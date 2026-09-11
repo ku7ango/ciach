@@ -38,3 +38,24 @@ Zrzuty lądują w `tests/` jako `t*.png`; obejrzyj je, bo asercje nie oceniają 
 Można importować `ciach`, podstawić obiekt z metodami `run_js` i `set_title` jako `app.window`,
 wywołać `app.load(path)` i `app.start_export(...)`; zdarzenia do JS trafiają do `run_js`.
 Wynik eksportu weryfikuj przez `ffprobe -show_entries stream=nb_frames,start_time`.
+
+## Testy Sekwencji i Podkładów
+
+- `venv\Scripts\python tests\test_sekwencja.py`: backend bez okna (atrapa `window` zbiera zdarzenia
+  z `run_js`). Sprawdza odrzucenie niezgodnych parametrów, sklejenie (liczba klatek, Styki, tytuł
+  `+1`, plik tymczasowy), Podkład z miksem w Ciachu i Małym Ciachu (jedna ścieżka AAC, ton
+  słyszalny tylko w oknie Podkładu, cisza poza nim), usunięcie Nagrania, sprzątanie temp.
+  Uruchamiany też w CI (`release.yml`). Pliki testowe `tests/_seq_*.mp4`, `tests/_podklad.mp3`.
+- `venv\Scripts\python tests\drive_seq.py [--exe]`: UI przez `/debug/js`. Dropy symuluje
+  `window.__ciach.dropFiles(paths, x, y)`, czyli ten sam router, do którego Python oddaje
+  prawdziwe upuszczenie (zdarzenie `dropped`). Pokrywa Gniazda podczas przeciągania (zrzut
+  `s1_gniazda.png`), sklejenie i wstawienie na początek (Podkład jedzie z obrazem), przesuwanie
+  Podkładu z Ctrl i Przyciąganie do Styku, Krawędzie, strzałki, Głośność, odtwarzanie Podkładu,
+  Ciach z miksem, Delete Podkładu i Nagrania, podmianę sesji. Zrzuty `tests/s*.png`.
+
+Oba skrypty UI (`drive_ui.py`, `drive_seq.py`) robią zrzuty i zamykają okno **po PID procesu, który
+same uruchomiły** (`shot_window.ps1 -ProcId`, `close_app()`), nigdy po tytule „Ciach*”: użytkownik
+zwykle ma w tym czasie otwarte własne okno `Ciach.exe`.
+
+`window.__ciach` daje dodatkowo `dropFiles`, `layout(withStrip)`, `extent()`, `podByGen(gen)`;
+`S.parts`, `S.pods`, `S.gain`, `S.sel` (null | 'left' | 'right' | {pod, edge}).

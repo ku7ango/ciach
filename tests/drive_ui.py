@@ -65,8 +65,17 @@ def wait(code, timeout=60, msg=""):
 
 def shot(name):
     r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                        os.path.join(SP, "shot_window.ps1"), "-Out", os.path.join(SP, name)], capture_output=True, text=True)
+                        os.path.join(SP, "shot_window.ps1"), "-Out", os.path.join(SP, name), "-ProcId", str(proc.pid)],
+                       capture_output=True, text=True)
     print("  shot:", r.stdout.strip() or r.stderr.strip())
+
+
+def close_app():
+    """Zamyka wyłącznie okno procesu uruchomionego przez test (po PID, nigdy po tytule)."""
+    subprocess.run(["powershell", "-NoProfile", "-Command",
+                    "$ids=@(%d)+@(Get-CimInstance Win32_Process -Filter 'ParentProcessId = %d' | %%{ $_.ProcessId });"
+                    "Get-Process | ? { $ids -contains $_.Id -and $_.MainWindowHandle -ne 0 } | %%{ $_.CloseMainWindow() | Out-Null }"
+                    % (proc.pid, proc.pid)], capture_output=True)
 
 
 def key(code, shift=False):
@@ -280,8 +289,7 @@ key("Enter")
 time.sleep(1.0)
 print("18 long export status:", status_text())
 print("   partial present:", [f for f in os.listdir(PROJ) if f.startswith(TEST_STEMS[0]) and f.endswith(".mp4")])
-subprocess.run(["powershell", "-NoProfile", "-Command",
-                "(Get-Process | Where-Object { $_.MainWindowTitle -like 'Ciach*' }).CloseMainWindow()"], capture_output=True)
+close_app()
 try:
     proc.wait(timeout=15)
     print("19 closed, rc", proc.returncode)

@@ -5,7 +5,7 @@ wrzuć plik, ustaw suwaki, wciśnij Enter. Wynik ląduje obok exe jako `<nazwa>_
 Słownik pojęć (Fragment, Suwak, Ciach, Mały Ciach) jest w `CONTEXT.md`.
 
 **Pobieranie:** gotowy `Ciach.exe` jest w zakładce
-[Releases](https://github.com/ku7ango/ciach/releases). Nie wymaga instalacji ani Pythona.
+[Releases](https://github.com/ku7ango/ciach/releases). Nie wymaga instalacji ani Pythona. Historia zmian: `CHANGELOG.md`.
 
 ## Sterowanie
 
@@ -22,7 +22,37 @@ Słownik pojęć (Fragment, Suwak, Ciach, Mały Ciach) jest w `CONTEXT.md`.
   jakość ciachu, dłuższe schodzą z fps (60→30) i rozdzielczością (720→540→360p). Wynik
   `<nazwa>_ciach_maly.<ext>`; jeśli po trzech próbach nadal za duży, plik zostaje z komunikatem `Za duży`.
 
-Plik źródłowy nigdy nie jest zmieniany. Postęp eksportu widać w rogu okna i w pasku tytułu.
+### Sklejanie nagrań
+
+- przeciągnij kolejny MP4 (albo kilka naraz) na timeline: w trakcie przeciągania na początku,
+  końcu i na każdym styku pojawiają się gniazda. Upuszczenie w gniazdo wstawia nagranie w to
+  miejsce, upuszczenie na film podmienia całą sesję jak dotąd.
+- sklejanie nie przekodowuje, więc nagrania muszą mieć tę samą rozdzielczość, kodek, format
+  pikseli i takie samo audio (kodek, częstotliwość, kanały). Fps może się różnić: sklejka
+  30 + 60 fps jest po prostu zmiennoklatkowa i ciach zachowuje wszystkie klatki. Kilka plików
+  naraz wchodzi w kolejności nazw. Suwaki po sklejeniu obejmują całość, wynik nazywa się po
+  pierwszym nagraniu.
+- Delete / Backspace bez zaznaczenia: usuwa nagranie, w którym stoi playhead (rysowane
+  odrobinę jaśniej). Ostatniego nagrania nie da się usunąć.
+- to samo działa dla MP3 z MP3.
+
+### Podkład (muzyka pod wideo)
+
+- przeciągnij MP3 na pasek pod timeline'em: powstaje osobny wiersz z podkładem, który zaczyna
+  się od początku filmu. Każdy kolejny MP3 dodaje kolejny wiersz. Upuszczenie MP3 na film
+  nadal podmienia sesję.
+- złap środek podkładu i przeciągnij: przesuwanie. Złap krawędź: przycinanie (muzyka zostaje
+  na miejscu, zmienia się tylko, od kiedy i do kiedy ją słychać). Krawędzie przyciągają się
+  do styków, suwaków, playheada, początku i końca filmu oraz innych podkładów; Ctrl podczas
+  przeciągania wyłącza przyciąganie.
+- zaznaczony podkład albo jego krawędź: ←/→ przesuwa o klatkę (Shift: 1 s), Home / End
+  dosuwa do początku / końca filmu, Delete usuwa.
+- ↑/↓: głośność (5 %, z Shift 1 %) zaznaczonego podkładu, a bez zaznaczenia głośność filmu.
+- podkład może wystawać za koniec filmu (timeline się wtedy wydłuża); przy ciachu liczy się
+  tylko fragment między suwakami. Dźwięk filmu i podkłady miksują się do jednej ścieżki AAC
+  192 kbit/s; bez podkładów i przy głośności 100 % dźwięk jest kopiowany 1:1 jak dotąd.
+Plik źródłowy nigdy nie jest zmieniany. Sklejone nagrania trafiają jako jeden plik tymczasowy do
+folderu tymczasowego systemu i znikają po zamknięciu okna. Postęp eksportu widać w rogu okna i w pasku tytułu.
 Zamknięcie okna w trakcie eksportu przerywa go i usuwa niedokończony plik.
 
 ## Dobrze wiedzieć
@@ -52,4 +82,4 @@ exe na GitHubie i podepnie go pod release.
 
 Ustawienie zmiennej `CIACH_DEBUG=1` włącza endpoint `POST /debug/js` na lokalnym porcie
 (wykonuje JS w oknie), a `CIACH_PORTFILE=<ścieżka>` zapisuje numer portu do pliku.
-Służy wyłącznie do automatycznych testów UI (`tests/drive_ui.py`); domyślnie wyłączone.
+Służy wyłącznie do automatycznych testów UI (`tests/drive_ui.py`, `tests/drive_seq.py`); domyślnie wyłączone.

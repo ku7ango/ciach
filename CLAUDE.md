@@ -5,17 +5,21 @@ dwa suwaki na timeline, wciska Enter, a fragment między suwakami ląduje obok e
 `<nazwa>_ciach.<ext>`. Zasada projektu: **żadnych przycisków ani pasków poza timeline'em**.
 Cała interakcja to mysz na timeline i klawiatura (README.md ma pełną listę skrótów).
 Dwa rodzaje eksportu: **Ciach** (Enter, pełna jakość) i **Mały Ciach** (Ctrl+Enter, plik do 25 MB).
+Nagrania da się sklejać w **Sekwencję** (drop na Gniazdo na timeline) i podkładać MP3 jako
+**Podkłady** (drop na pasek pod timeline'em); decyzje z tej sesji projektowej są w `docs/adr/`.
 Terminy domenowe są w `CONTEXT.md`; używaj ich w komunikatach, nazwach i kodzie.
 
 ## Stack i struktura
 
 - `ciach.py` – cały backend: pywebview (WebView2) tworzy okno, wbudowany serwer HTTP serwuje UI,
   media z obsługą Range i dane binarne (`/api/wave`, `/api/frames`), ffprobe/ffmpeg robią
-  analizę i eksport. Klasa `App` trzyma stan, `Api` to metody widoczne z JS. Plan jakości
-  Małego Ciachu to czysta funkcja `plan_small_video` (test: `tests/test_plan_small.py`).
-- `ui/app.js` – cały frontend: stan `S`, timeline na canvasie (`draw`), suwaki jako indeksy
-  klatek (`frameTs` / `frameIndex`), klawiatura, pętla odtwarzania (`tick`), zdarzenia z Pythona
-  przez `window.ciachEvent`.
+  analizę i eksport. Klasa `App` trzyma stan (bieżąca Sekwencja `media` z `parts`, Podkłady
+  w `podklady`), `Api` to metody widoczne z JS. Plan jakości Małego Ciachu to czysta funkcja
+  `plan_small_video` (test: `tests/test_plan_small.py`); sklejanie i miks: `tests/test_sekwencja.py`.
+- `ui/app.js` – cały frontend: stan `S`, timeline na canvasie (`draw`, układ wierszy w `layout`),
+  suwaki jako indeksy klatek (`frameTs` / `frameIndex`), Podkłady w sekundach (`at`, `tin`, `tout`),
+  klawiatura, pętla odtwarzania (`tick`, Podkłady przez własne `<audio>`), zdarzenia z Pythona
+  przez `window.ciachEvent`, routing dropów w `dropFiles`.
 - `build.ps1` – venv, zależności, kopia ffmpeg/ffprobe z PATH, ikona, PyInstaller `--onefile`,
   wynik `Ciach.exe` w katalogu projektu (~200 MB, w środku pełny ffmpeg).
 - Python 3.14 + numpy (waveform), pywebview 6, PyInstaller 6. Brak .NET, Rusta i kompilatora C
@@ -25,7 +29,8 @@ Terminy domenowe są w `CONTEXT.md`; używaj ich w komunikatach, nazwach i kodzi
 
 - Uruchomienie ze źródła: `venv\Scripts\python ciach.py [plik]`. Przebudowa: `build.ps1`.
 - Test end-to-end (źródło lub exe) opisany w `agent_docs/testing.md`. Nigdy nie steruj oknem
-  przez SendKeys ani nie zabieraj fokusu; używaj endpointu debugowego z tego dokumentu.
+  przez SendKeys ani nie zabieraj fokusu; używaj endpointu debugowego z tego dokumentu. Zrzuty
+  i zamykanie okna tylko po PID własnego procesu testu, bo użytkownik ma otwarte swoje okno.
 - Zanim zmienisz polecenia ffmpeg, przeczytaj `agent_docs/export_pipeline.md`: zawiera powody
   dwustopniowego seeka, semantykę zakresu klatek, drabinkę Małego Ciachu i pułapki, w które
   już raz wpadliśmy.

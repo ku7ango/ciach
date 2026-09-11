@@ -50,3 +50,50 @@ interpretacjach MB/MiB). Plan liczy `plan_small_video` (czysta funkcja, testowan
   Windows bez płatnego rozszerzenia nie odtworzy HEVC.
 - mp3: najpierw zwykła kopia; gdy za duża, libmp3lame 128 → 96 → 64 kbit/s; gdy nawet 64
   nie wystarczy, plik usuwany i UI dostaje `toolong`.
+
+## Sekwencja (sklejanie Nagrań)
+
+Decyzja i powody: `docs/adr/0001-sekwencja-jako-plik-tymczasowy.md`. `App.build_sequence` skleja
+części przez concat demuxer (`-f concat -safe 0 -i lista.txt -map 0 -c copy`, dla mp4 z `+faststart`)
+do `%TEMP%\ciach_seq_*\seq_<gen>.<ext>`, a potem ładuje wynik jak zwykłe Nagranie (`install_media`).
+`Media.parts` trzyma części z czasami startu (Styki), `display_name` nazwę pierwszego Nagrania
+(tytuł, nazwa wyniku). Zgodność parametrów sprawdza `Media.signature()` przed sklejeniem.
+
+Pułapki, które już widzieliśmy:
+
+- ffprobe liczy dla sklejki średni fps jako klatki / czas, a czas concat zaokrągla o ogon audio:
+  dwa Ciachy 30 fps dają sklejkę „29,9509 fps”. Dlatego sygnatura Sekwencji to `Media.sig`
+  skopiowana z pierwszego Nagrania, a fps w ogóle nie wchodzi do sygnatury.
+- Sklejka 30 + 60 fps jest zmiennoklatkowa. Bez `-enc_time_base:v demux` x264 dostawał bazę
+  czasu 1/30 z pierwszej części i gubił co drugą klatkę części 60 fps (59 zamiast 89 klatek).
+  Flaga jest w `VIDEO_TB` i idzie do obu eksportów; `:v`, bo dla audio z filtra „demux” nie
+  istnieje i ffmpeg przerywa z „Demuxing timebase not available”.
+
+- Pliki z AAC mają na starcie opóźnienie kodera (pierwszy pakiet audio przy −23 ms). Concat
+  demuxer przesuwa cały plik tak, żeby zaczynał się od zera, więc wideo i audio w sklejce są
+  o te ~23 ms później niż w źródle, ale **razem**: synchronizacja A/V jest zachowana, a
+  pierwsza klatka ma pts ~0,023 zamiast 0 (skan klatek to widzi, `frameTs(0)` i tak zwraca 0).
+- Na Styku ffmpeg ostrzega `Non-monotonic DTS`: ogon audio poprzedniej części (padding AAC)
+  nachodzi na początek następnej o ~20 ms. To cecha kopiowania AAC bez przekodowania; słyszalne
+  co najwyżej jako minimalny szew, akceptowane.
+- Sekwencja z jednym Nagraniem nie tworzy pliku tymczasowego: po usunięciu części do jednej
+  ładowany jest oryginał.
+
+## Podkłady i Głośność (miks)
+
+`App.resolve_mix` zwraca `None`, gdy nic nie ma do miksowania (brak Podkładów, Głośność 100 %):
+wtedy polecenia są identyczne jak dawniej (`-c:a copy`). W przeciwnym razie `App.mix_filters`
+buduje jeden graf:
+
+- dźwięk Sekwencji: `[0:a:0]…[0:a:n]amix=normalize=0,volume=<Głośność>` (wszystkie ścieżki OBS
+  do jednej),
+- każdy Podkład jako kolejne wejście `-i` (po wejściu 0, przed wyjściowym `-ss`):
+  `atrim=start=tin:end=tout,asetpts=PTS-STARTPTS,adelay=<ms>,volume=<Głośność>`,
+- `amix=inputs=k:normalize=0:duration=first` (bez normalizacji, bo amix domyślnie ścisza).
+
+Czasy: wejście 0 jest przesunięte wejściowym `-ss pre`, więc `adelay` = `at − pre`; Podkład
+zaczynający się przed `pre` dostaje większe `tin` zamiast ujemnego opóźnienia. Wyjściowe
+`-ss`/`-t` tną zmiksowaną ścieżkę tak samo jak wideo. Kodek: AAC `MIX_AUDIO_RATE` (192k) w Ciachu;
+w Małym Ciachu plan dostaje `audio_streams >= 2`, żeby nigdy nie wybrał kopii, i bierze bitrate
+z drabinki. Weryfikacja: `tests/test_sekwencja.py` mierzy `volumedetect` w oknach, gdzie Podkład
+ma być słyszalny i gdzie ma być cisza.

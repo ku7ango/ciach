@@ -42,6 +42,10 @@ jobs:
         shell: pwsh
         run: .\venv\Scripts\python tests\test_plan_small.py
 
+      - name: Test Sekwencji i Podkładów (backend, bez okna)
+        shell: pwsh
+        run: .\venv\Scripts\python tests\test_sekwencja.py
+
       - name: Sprawdź, że exe startuje i ma w środku ffmpeg
         shell: pwsh
         run: |
@@ -55,9 +59,27 @@ jobs:
           name: Ciach
           path: Ciach.exe
 
+      - name: Opis release'u z CHANGELOG.md (sekcja bieżącego tagu)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $lines = Get-Content CHANGELOG.md -Encoding UTF8
+          $out = New-Object System.Collections.Generic.List[string]
+          $inside = $false
+          foreach ($l in $lines) {
+            if ($l -match '^## ') { if ($inside) { break }; $inside = ($l.Trim() -eq "## $tag"); continue }
+            if ($inside) { $out.Add($l) }
+          }
+          if ($out.Count -eq 0) { $out.Add("Brak sekcji $tag w CHANGELOG.md.") }
+          [IO.File]::WriteAllLines("release_notes.md", $out, (New-Object Text.UTF8Encoding $false))
+          Get-Content release_notes.md
+
       - name: Release z exe
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: Ciach ${{ github.ref_name }}
           files: Ciach.exe
+          body_path: release_notes.md
           generate_release_notes: true

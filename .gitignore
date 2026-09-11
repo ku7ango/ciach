@@ -12,4 +12,5 @@ Ciach_error.log
 *_ciach*.mp3
 tests/_*
 tests/t*.png
+tests/s*.png
 tests/__pycache__/

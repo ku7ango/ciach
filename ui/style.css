@@ -111,8 +111,8 @@ body.dragover #dropmask { opacity: 1; }
 #status.done { color: #8ee08e; }
 
 #timeline {
-  flex: 0 0 110px;
-  height: 110px;
+  flex: 0 0 auto;
+  height: 110px; /* JS ustawia wysokość wg liczby Podkładów (layout w app.js) */
   background: var(--tl-bg);
   border-top: 1px solid #2a2a30;
   position: relative;
