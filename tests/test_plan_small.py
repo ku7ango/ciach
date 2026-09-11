@@ -2,6 +2,9 @@
 import os
 import sys
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")  # konsola Windows w cp1252 nie zna polskich liter
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ciach import SMALL_LIMIT, plan_small_video  # noqa: E402
 
