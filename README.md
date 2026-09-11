@@ -1,4 +1,4 @@
-# Ciach
+# <img src="assets/icon.png" width="40" valign="middle" alt=""> Ciach
 
 Jednoplikowy trimmer MP4/MP3 dla Windows 11. Bez instalacji: uruchom `Ciach.exe`,
 wrzuć plik, ustaw suwaki, wciśnij Enter. Wynik ląduje obok exe jako `<nazwa>_ciach.<ext>`.

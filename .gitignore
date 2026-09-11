@@ -6,7 +6,7 @@ __pycache__/
 Ciach.exe
 ffmpeg.exe
 ffprobe.exe
-icon.png
+/icon.png
 Ciach_error.log
 *_ciach*.mp4
 *_ciach*.mp3
