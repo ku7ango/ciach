@@ -4,6 +4,9 @@ Jednoplikowy trimmer MP4/MP3 dla Windows 11. Bez instalacji: uruchom `Ciach.exe`
 wrzuć plik, ustaw suwaki, wciśnij Enter. Wynik ląduje obok exe jako `<nazwa>_ciach.<ext>`.
 Słownik pojęć (Fragment, Suwak, Ciach, Mały Ciach) jest w `CONTEXT.md`.
 
+**Pobieranie:** gotowy `Ciach.exe` jest w zakładce
+[Releases](https://github.com/ku7ango/ciach/releases). Nie wymaga instalacji ani Pythona.
+
 ## Sterowanie
 
 - przeciągnij MP4 lub MP3 do okna (albo na ikonę exe)
@@ -41,6 +44,9 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
 Uruchomienie bez budowania: `venv\Scripts\python ciach.py`.
+
+Wydanie nowej wersji: wypchnij tag `vX.Y.Z`, a workflow `.github/workflows/release.yml` zbuduje
+exe na GitHubie i podepnie go pod release.
 
 ## Tryb testowy
 

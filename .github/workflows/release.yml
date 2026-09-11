@@ -1,0 +1,59 @@
+# Buduje Ciach.exe na runnerze Windows i podpina go pod release GitHuba.
+# Uruchamia się po wypchnięciu tagu v* (np. `git tag v1.0.0 && git push origin v1.0.0`)
+# albo ręcznie z zakładki Actions (wtedy exe ląduje jako artefakt, bez release'u).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Pobierz ffmpeg (pełny build gyan.dev, ten sam co lokalnie)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full.7z -OutFile ffmpeg.7z
+          7z x ffmpeg.7z -offmpeg_tmp | Out-Null
+          Copy-Item (Get-ChildItem ffmpeg_tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName .\ffmpeg.exe
+          Copy-Item (Get-ChildItem ffmpeg_tmp -Recurse -Filter ffprobe.exe | Select-Object -First 1).FullName .\ffprobe.exe
+          .\ffmpeg.exe -version | Select-Object -First 1
+
+      - name: Zbuduj Ciach.exe
+        shell: pwsh
+        run: .\build.ps1
+
+      - name: Test planowania Małego Ciachu
+        shell: pwsh
+        run: .\venv\Scripts\python tests\test_plan_small.py
+
+      - name: Sprawdź, że exe startuje i ma w środku ffmpeg
+        shell: pwsh
+        run: |
+          $mb = [math]::Round((Get-Item .\Ciach.exe).Length / 1MB)
+          Write-Host "Ciach.exe: $mb MB"
+          if ($mb -lt 150) { throw "Exe jest podejrzanie mały, ffmpeg chyba nie trafił do środka" }
+
+      - name: Artefakt (dla uruchomień ręcznych)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Ciach
+          path: Ciach.exe
+
+      - name: Release z exe
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Ciach.exe
+          generate_release_notes: true
