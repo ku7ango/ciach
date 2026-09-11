@@ -1,0 +1,15 @@
+venv/
+build/
+dist/
+__pycache__/
+*.spec
+Ciach.exe
+ffmpeg.exe
+ffprobe.exe
+icon.png
+Ciach_error.log
+*_ciach*.mp4
+*_ciach*.mp3
+tests/_*
+tests/t*.png
+tests/__pycache__/

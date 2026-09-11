@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<title>Ciach</title>
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<div id="app">
+  <div id="preview">
+    <video id="video" preload="auto" playsinline disablepictureinpicture></video>
+    <div id="status" hidden></div>
+    <div id="start">
+      <div class="start-main">Przeciągnij tutaj plik MP4 lub MP3</div>
+      <div class="start-keys">spacja – play/pauza &nbsp;·&nbsp; ←/→ – klatka &nbsp;·&nbsp; Shift+←/→ – 1 s &nbsp;·&nbsp; Enter – ciach &nbsp;·&nbsp; Ctrl+Enter – mały ciach</div>
+      <div id="reject"></div>
+    </div>
+    <div id="dropmask"></div>
+  </div>
+  <div id="timeline"><canvas id="tl"></canvas></div>
+</div>
+<script src="/ui/app.js"></script>
+</body>
+</html>

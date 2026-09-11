@@ -1,0 +1,127 @@
+:root {
+  --bg: #151517;
+  --tl-bg: #1b1b1f;
+  --fg: #d8d8dc;
+  --muted: #7a7a84;
+  --accent: #ff8c1a;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.4 "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+#preview {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: #000;
+  overflow: hidden;
+}
+
+#video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  outline: none;
+}
+
+body.kind-audio #video { display: none; }
+body.kind-audio #preview { background: var(--bg); }
+body:not(.loaded) #video { display: none; }
+body:not(.loaded) #preview { background: var(--bg); }
+
+#start {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  text-align: center;
+  padding: 24px;
+}
+body.loaded #start { display: none; }
+
+.start-main {
+  font-size: 22px;
+  color: var(--fg);
+}
+
+.start-keys {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#reject {
+  font-size: 13px;
+  color: #ff7070;
+  min-height: 1.4em;
+}
+
+#dropmask {
+  position: absolute;
+  inset: 8px;
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+  background: rgba(255, 140, 26, 0.08);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 120ms;
+}
+body.dragover #dropmask { opacity: 1; }
+
+#status {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: rgba(20, 20, 24, 0.55);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+  pointer-events: none;
+  z-index: 5;
+  backdrop-filter: blur(3px);
+}
+#status.error {
+  pointer-events: auto;
+  color: #ff7a7a;
+  cursor: help;
+}
+#status.done { color: #8ee08e; }
+
+#timeline {
+  flex: 0 0 110px;
+  height: 110px;
+  background: var(--tl-bg);
+  border-top: 1px solid #2a2a30;
+  position: relative;
+}
+
+#tl {
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: default;
+  touch-action: none;
+}
