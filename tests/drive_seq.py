@@ -12,6 +12,9 @@ import sys
 import time
 import urllib.request
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # konsola Windows w cp1250 nie zna „✓”
+
 SP = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(SP)
 sys.path.insert(0, SP)

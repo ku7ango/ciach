@@ -5,8 +5,9 @@ dwa suwaki na timeline, wciska Enter, a fragment między suwakami ląduje obok e
 `<nazwa>_ciach.<ext>`. Zasada projektu: **żadnych przycisków ani pasków poza timeline'em**.
 Cała interakcja to mysz na timeline i klawiatura (README.md ma pełną listę skrótów).
 Dwa rodzaje eksportu: **Ciach** (Enter, pełna jakość) i **Mały Ciach** (Ctrl+Enter, plik do 25 MB).
-Nagrania da się sklejać w **Sekwencję** (drop na Gniazdo na timeline) i podkładać MP3 jako
-**Podkłady** (drop na pasek pod timeline'em); decyzje z tej sesji projektowej są w `docs/adr/`.
+Nagrania da się sklejać w **Sekwencję** (drop na Gniazdo na timeline), podkładać MP3 jako
+**Podkłady** (drop na pasek pod timeline'em) i powiększać fragment obrazu jako **Zbliżenie**
+(Z + drag na podglądzie rysuje Kadr, własny wiersz na timeline); decyzje projektowe są w `docs/adr/`.
 Terminy domenowe są w `CONTEXT.md`; używaj ich w komunikatach, nazwach i kodzie.
 
 ## Stack i struktura
@@ -15,9 +16,12 @@ Terminy domenowe są w `CONTEXT.md`; używaj ich w komunikatach, nazwach i kodzi
   media z obsługą Range i dane binarne (`/api/wave`, `/api/frames`), ffprobe/ffmpeg robią
   analizę i eksport. Klasa `App` trzyma stan (bieżąca Sekwencja `media` z `parts`, Podkłady
   w `podklady`), `Api` to metody widoczne z JS. Plan jakości Małego Ciachu to czysta funkcja
-  `plan_small_video` (test: `tests/test_plan_small.py`); sklejanie i miks: `tests/test_sekwencja.py`.
+  `plan_small_video` (test: `tests/test_plan_small.py`); sklejanie i miks: `tests/test_sekwencja.py`;
+  Zbliżenia (sendcmd + crop + scale, `zoom_commands`): `tests/test_zblizenie.py`.
 - `ui/app.js` – cały frontend: stan `S`, timeline na canvasie (`draw`, układ wierszy w `layout`),
   suwaki jako indeksy klatek (`frameTs` / `frameIndex`), Podkłady w sekundach (`at`, `tin`, `tout`),
+  Zbliżenia jako pts Klatek (`at`, `end`) z pozycjami Kadru `keys` (`{t, k:{x, y, s}}`), nakładka
+  Kadrów na podglądzie (`#ov`, `drawOverlay`, transform na `<video>` w trakcie odtwarzania),
   klawiatura, pętla odtwarzania (`tick`, Podkłady przez własne `<audio>`), zdarzenia z Pythona
   przez `window.ciachEvent`, routing dropów w `dropFiles`.
 - `build.ps1` – venv, zależności, kopia ffmpeg/ffprobe z PATH, ikona, PyInstaller `--onefile`,

@@ -79,6 +79,48 @@ Pułapki, które już widzieliśmy:
 - Sekwencja z jednym Nagraniem nie tworzy pliku tymczasowego: po usunięciu części do jednej
   ładowany jest oryginał.
 
+## Zbliżenia (crop sterowany per klatka)
+
+UI wysyła w `mix.zblizenia` listę `{at, end, rin, rout, keys: [{t, x, y, s}]}`: czasy Sekwencji
+(pts Klatek, `end` wyłącznie), a `keys` to pozycje Kadru zapamiętane na Klatkach, jako ułamki obrazu
+(`s` = bok Kadru względem szerokości i wysokości, więc proporcje obrazu są zachowane z definicji;
+0,2 ≤ s ≤ 1). Między pozycjami Kadr jest liniowy w czasie, przed pierwszą i za ostatnią stoi
+(`App.kadr_keys`); Rampa mnoży: widziany Kadr = całość + (Kadr − całość) · f, gdzie f rośnie liniowo
+0→1 w Rampie wejścia i maleje w Rampie wyjścia (`App.ramp_factor`). `App.resolve_zoom` waliduje
+i sortuje, `App.zoom_commands` pisze plik poleceń, `App.zoom_chain` daje łańcuch wideo:
+
+```
+[0:v:0]sendcmd=f=zoom.cmd,crop=w=iw:h=ih:x=0:y=0,scale=W:H[v]
+```
+
+Dlaczego tak, a nie prościej:
+
+- `crop` liczy `w`/`h` tylko raz przy konfiguracji (per klatka są tylko `x`/`y`), więc Rampa
+  i przejazd A→B o różnej krotności nie dadzą się zapisać wyrażeniem od `t`.
+- `zoompan` przeliczałby pts od zera z własnym fps (sklejka 30 + 60 fps traciłaby klatki),
+  a `scale` z `eval=frame` przed `crop` daje klatki o zmiennym rozmiarze, których `crop` nie obsłuży.
+- `sendcmd` wysyła do `crop` polecenia `w h x y` (crop je obsługuje) na każdej klatce w odcinku
+  z flagą `[expr]` (zmienna `TI` = 0..1 w obrębie odcinka) albo raz przy wejściu w odcinek
+  (`[enter]`, stały Kadr). Wyjście `crop` ma wtedy zmienny rozmiar, a `scale` jest jedynym
+  filtrem, który przy zmianie rozmiaru wejścia sam się rekonfiguruje; wynik ma stały `W:H`.
+- Czas w grafie = czas Sekwencji − `pre` (wejściowy `-ss` zeruje znaczniki na punkcie seeku,
+  `scan_frames` odejmuje `start_time`, więc obie strony liczą to samo; sprawdzone na nagraniu
+  OBS przez `showinfo`). Odcinki dostają ten sam zapas 0,5 ms co cięcie (`ZOOM_EPS`).
+- Plik poleceń leży w katalogu tymczasowym eksportu, a ffmpeg dostaje ten katalog jako `cwd`:
+  ścieżka względna `zoom.cmd` omija escapowanie `C:\` i spacji w składni filtergraph.
+- Odcinki: punkty podziału to `at`, `end`, końce Ramp i czasy pozycji. W odcinku Kadr i f są liniowe
+  w TI, więc ich iloczyn jest kwadratowy: `c0+c1*TI+c2*TI*TI`, współczynniki z trzech punktów
+  (TI = 0, ½, 1). Odcinek bez ruchu to `[enter]` ze stałymi wartościami. W wyrażeniach nie ma
+  przecinków (przecinek rozdziela polecenia sendcmd), stąd żadnych `if`/`max`. Odcinki po ostatnim
+  Zbliżeniu i między Zbliżeniami resetują crop do całości.
+- Mały Ciach: łańcuch Zbliżenia skaluje od razu do rozmiaru z planu (`scale=ow:oh` z parzystą
+  szerokością), bo `-2:h` liczyłoby szerokość osobno dla każdej klatki o innym rozmiarze.
+  Idzie do obu przebiegów two-pass. `crop` z `exact=0` sam wyrównuje w/h/x/y do parzystych.
+
+Test: `tests/test_zblizenie.py` mierzy `signalstats` (UAVG) per klatka na źródle
+czerwony | niebieski: Kadr w niebieskiej połowie daje klatkę całą niebieską, więc granice
+Zbliżenia, Rampy, przejazd między pozycjami i sklejka są sprawdzane co do klatki.
+
 ## Podkłady i Głośność (miks)
 
 `App.resolve_mix` zwraca `None`, gdy nic nie ma do miksowania (brak Podkładów, Głośność 100 %):

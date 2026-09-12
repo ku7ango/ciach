@@ -46,6 +46,10 @@ jobs:
         shell: pwsh
         run: .\venv\Scripts\python tests\test_sekwencja.py
 
+      - name: Test Zbliżeń (backend, bez okna)
+        shell: pwsh
+        run: .\venv\Scripts\python tests\test_zblizenie.py
+
       - name: Sprawdź, że exe startuje i ma w środku ffmpeg
         shell: pwsh
         run: |

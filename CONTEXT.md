@@ -26,11 +26,11 @@ Nagranie MP3 ułożone w osobnym wierszu pod Sekwencją wideo, z własną pozycj
 _Avoid_: ścieżka, muzyka, track, warstwa, tło
 
 **Krawędź**:
-Lewy lub prawy brzeg Podkładu. Przesunięcie Krawędzi przycina Podkład (treść zostaje na miejscu), przesunięcie środka przesuwa cały Podkład.
+Lewy lub prawy brzeg Podkładu albo Zbliżenia. Przesunięcie Krawędzi Podkładu przycina go (treść zostaje na miejscu), Krawędzi Zbliżenia zmienia jego długość (przejazd A→B rozciąga się na nową długość); przesunięcie środka przesuwa całość.
 _Avoid_: uchwyt, brzeg, in/out, handle
 
 **Przyciąganie**:
-Automatyczne dociąganie Krawędzi przesuwanego Podkładu do Styku, Suwaka, końca Sekwencji lub Krawędzi innego Podkładu, gdy znajdzie się blisko. Ctrl wyłącza.
+Automatyczne dociąganie Krawędzi przesuwanego Podkładu lub Zbliżenia do Styku, Suwaka, Playheada, końca Sekwencji lub Krawędzi innego Podkładu albo Zbliżenia, gdy znajdzie się blisko. Ctrl wyłącza.
 _Avoid_: snap, magnes, dopasowanie
 
 **Głośność**:
@@ -64,3 +64,15 @@ _Avoid_: kompresja, ciach na Messengera, ciach 25, wersja skompresowana
 **Limit rozmiaru**:
 Maksymalna liczba bajtów pliku wynikowego Małego Ciachu. Domyślnie wynika z ograniczeń Messengera.
 _Avoid_: budżet, cap, rozmiar docelowy
+
+**Zbliżenie**:
+Przedział na timeline, w którym widz zamiast całego obrazu widzi Kadr. Kadr ma pozycję na każdej Klatce przedziału: tam, gdzie użytkownik go ustawił, stoi dokładnie tak; między dwiema ustawionymi pozycjami przejeżdża liniowo; przed pierwszą i za ostatnią stoi w miejscu. Zbliżenia leżą w jednym wierszu i nie mogą na siebie nachodzić; narysowanie nowego Kadru wewnątrz Zbliżenia rozcina je i zaczyna następne. Przed i po Zbliżeniu widać cały obraz. Zbliżenie jest przywiązane do obrazu: usunięcie Nagrania, w którym choć częściowo leży, usuwa je.
+_Avoid_: przybliżenie (to zoom widoku timeline'u kółkiem), zoom, najazd, efekt, crop, klucz, keyframe
+
+**Kadr**:
+Prostokąt na obrazie w proporcjach obrazu, który w Zbliżeniu jest powiększany na cały ekran. Na każdej Klatce Zbliżenia jest jeden Kadr; można go narysować (Z + przeciągnięcie), przesunąć (środek) i zmienić jego wielkość (róg), a edycja na danej Klatce zapamiętuje jego pozycję w tej Klatce. Nigdy nie wychodzi poza obraz. Poza przedziałem zaznaczonego Zbliżenia widać Cień Kadru: złapanie go wydłuża Zbliżenie do tej Klatki.
+_Avoid_: kwadrat, ramka, okno, prostokąt, zaznaczenie, crop, Kadr A/B
+
+**Rampa**:
+Początkowy lub końcowy odcinek Zbliżenia, w którym obraz płynnie przechodzi z całości do Kadru (Rampa wejścia) albo z Kadru do całości (Rampa wyjścia); Kadr może się w tym czasie ruszać. Domyślnie zerowa: obraz wskakuje w Kadr od razu. Ustawiana górnym rogiem Zbliżenia.
+_Avoid_: przejście, easing, fade, najazd, wjazd

@@ -58,4 +58,26 @@ same uruchomiły** (`shot_window.ps1 -ProcId`, `close_app()`), nigdy po tytule �
 zwykle ma w tym czasie otwarte własne okno `Ciach.exe`.
 
 `window.__ciach` daje dodatkowo `dropFiles`, `layout(withStrip)`, `extent()`, `podByGen(gen)`;
-`S.parts`, `S.pods`, `S.gain`, `S.sel` (null | 'left' | 'right' | {pod, edge}).
+`S.parts`, `S.pods`, `S.gain`, `S.sel` (null | 'left' | 'right' | {pod, edge} | {zoom, part}).
+
+## Testy Zbliżeń
+
+- `venv\Scripts\python tests\test_zblizenie.py`: backend bez okna. Źródło `tests/_zoom_src.mp4`
+  (lewa połowa czerwona, prawa niebieska); Kadr w niebieskiej połowie daje klatkę całą
+  niebieską, a `signalstats` (UAVG per klatka) mówi co do klatki, gdzie Zbliżenie działa.
+  Sprawdza plik poleceń sendcmd, Zbliżenie stojące, Rampy z przejazdem (monotoniczność), trzy
+  pozycje (postój, przejazd, postój), Mały Ciach z miksem, Zbliżenie w sklejonej Sekwencji
+  (`_zoom_pre.mp4` z przodu), sprzątanie temp.
+  Uruchamiany w CI (`release.yml`).
+- `venv\Scripts\python tests\drive_zoom.py [--exe]`: UI przez `/debug/js`. Kadry rysuje
+  `PointerEvent` na nakładce `#ov` (Z trzymane przez osobne keydown/keyup), Zbliżenia na `#tl`.
+  Pokrywa rysowanie (Zbliżenie na jedną Klatkę), Z + klik bez skutku, Cień poza przedziałem i
+  wydłużenie przez jego złapanie, pozycję zapamiętaną rogiem na Klatce w środku przejazdu, rozcięcie
+  przez Z + przeciągnięcie wewnątrz, przesuwanie z Ctrl (pozycje jadą razem), Przyciąganie Krawędzi
+  do Suwaka, skrócenie kasujące pozycje, Rampę z rogu i Ctrl+strzałkami (zwykłe strzałki i End chodzą po Klatkach), Delete na Rampie, transform
+  wideo w trakcie odtwarzania, Esc bez Cienia, Ciach przez Enter (wszystkie klatki niebieskie),
+  Delete Zbliżenia. Zrzuty `tests/z*.png`.
+  Po zmianie wysokości timeline'u (pojawił się wiersz) prostokąt obrazu `videoRect()` trzeba pobrać
+  na nowo, bo podgląd się kurczy.
+- Oba skrypty zamykają okno po PID w `finally`, także po nieudanej asercji. Nigdy nie zabijaj
+  procesów testu wzorcem na `CommandLine`: wzorzec pasuje też do powłoki, która go wykonuje.

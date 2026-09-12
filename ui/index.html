@@ -9,10 +9,17 @@
 <div id="app">
   <div id="preview">
     <video id="video" preload="auto" playsinline disablepictureinpicture></video>
+    <canvas id="ov"></canvas>
     <div id="status" hidden></div>
     <div id="start">
       <div class="start-main">Przeciągnij tutaj plik MP4 lub MP3</div>
-      <div class="start-keys">spacja – play/pauza &nbsp;·&nbsp; ←/→ – klatka &nbsp;·&nbsp; Shift+←/→ – 1 s &nbsp;·&nbsp; Enter – ciach &nbsp;·&nbsp; Ctrl+Enter – mały ciach</div>
+      <div class="start-keys">
+        <div><b>Timeline</b> spacja play/pauza · klik ustawia pozycję · suwak: przeciągnij · ←/→ klatka, Shift 1 s · Home/End · Esc odznacza · kółko przybliża, Shift+kółko przesuwa, dwuklik całość</div>
+        <div><b>Ciach</b> Enter pełna jakość · Ctrl+Enter mały ciach (do 25 MB)</div>
+        <div><b>Sekwencja</b> kolejny MP4 w gniazdo na timeline (na początku, końcu, styku) · Delete bez zaznaczenia usuwa nagranie pod playheadem</div>
+        <div><b>Podkład</b> MP3 na pasek pod timeline'em · środek przesuwa, krawędź przycina · Ctrl wyłącza przyciąganie · ↑/↓ głośność (Shift 1 %) · Delete usuwa</div>
+        <div><b>Zbliżenie</b> Z + przeciągnij na obrazie: Kadr · na dalszych klatkach złap szary cień, żeby wydłużyć · na każdej klatce: środek Kadru przesuwa, róg skaluje (pozycja zapamiętana w tej klatce) · Z + przeciągnij wewnątrz: rozcięcie · na pasku: środek przesuwa, krawędź zmienia długość, górny róg rampa · Ctrl+←/→ przesuwa zaznaczone (Shift 1 s), zwykłe strzałki chodzą po klatkach · Delete usuwa (na rampie zeruje) · Esc odznacza</div>
+      </div>
       <div id="reject"></div>
     </div>
     <div id="dropmask"></div>

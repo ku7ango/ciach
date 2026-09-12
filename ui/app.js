@@ -8,6 +8,8 @@
   const ctx = canvas.getContext('2d');
   const statusEl = document.getElementById('status');
   const rejectEl = document.getElementById('reject');
+  const ov = document.getElementById('ov');       // nakładka Kadrów na podglądzie
+  const octx = ov.getContext('2d');
 
   const C = {
     bg: '#1b1b1f',
@@ -23,6 +25,11 @@
     podBorder: 'rgba(138,164,255,0.55)',
     podPeak: '#5aa86a',
     podRms: '#9ad8a4',
+    zoomFill: 'rgba(255,140,26,0.16)',
+    zoomBorder: 'rgba(255,170,90,0.6)',
+    kadr: '#ff8c1a',
+    kadrGhost: 'rgba(210,210,220,0.75)',
+    kadrNow: 'rgba(255,255,255,0.75)',
     handle: '#c9cbd6',
     handleSel: '#ff8c1a',
     playhead: '#f2f2f5',
@@ -37,6 +44,9 @@
   const TOP = 22;      // pasek etykiet suwaków / playheada
   const VID_H = 68;    // wiersz Sekwencji (waveform)
   const ROW_H = 44;    // wiersz jednego Podkładu
+  const ZOOM_H = 30;   // wiersz Zbliżeń
+  const KADR_MIN = 0.2; // najmniejszy Kadr: 20 % obrazu (5×)
+  const CORNER = 7;    // uchwyt rogu Kadru na podglądzie (px CSS)
   const STRIP_H = 24;  // Gniazdo na nowy Podkład (tylko podczas przeciągania)
   const BOTTOM = 20;   // pasek linijki i etykiety pod kursorem
   const GRIP_W = 12;
@@ -61,7 +71,14 @@
     left: 0,
     right: 1,
     // zaznaczenie: null (fokus na wideo) | 'left' | 'right' | {pod: gen, edge: null|'in'|'out'}
+    //              | {zoom: id, part: null|'in'|'out'|'rin'|'rout'}
     sel: null,
+    width: 0,        // rozmiar obrazu Sekwencji (Kadry są ułamkami tych wymiarów)
+    height: 0,
+    zooms: [],       // Zbliżenia: {id, at, end, rin, rout, keys:[{t, k:{x,y,s}}]}; at/end/t = pts Klatek
+    zoomSeq: 0,
+    zKey: false,     // przytrzymane Z: rysowanie Kadru na podglądzie
+    pdrag: null,     // przeciąganie na podglądzie: {kind:'draw'|'move'|'resize', ...}
     drag: null,
     view: { start: 0, end: 1 },
     viewFull: true,
@@ -125,7 +142,88 @@
   function podLen(p) { return p.tout - p.tin; }
   function podEnd(p) { return p.at + podLen(p); }
   function podByGen(gen) { return S.pods.find((p) => p.gen === gen) || null; }
-  function selPod() { return S.sel && typeof S.sel === 'object' ? podByGen(S.sel.pod) : null; }
+  function selPod() { return S.sel && typeof S.sel === 'object' && S.sel.pod != null ? podByGen(S.sel.pod) : null; }
+
+  // ---------- Zbliżenia: Kadry ----------
+  const FULL = { x: 0, y: 0, s: 1 };
+  function zoomById(id) { return S.zooms.find((z) => z.id === id) || null; }
+  function selZoom() { return S.sel && typeof S.sel === 'object' && S.sel.zoom != null ? zoomById(S.sel.zoom) : null; }
+  function zoomLen(z) { return z.end - z.at; }
+  function zoomAt(t) { return S.zooms.find((z) => t >= z.at - 1e-6 && t < z.end - 1e-6) || null; }
+  function sameKadr(a, b) { return Math.abs(a.x - b.x) < 1e-4 && Math.abs(a.y - b.y) < 1e-4 && Math.abs(a.s - b.s) < 1e-4; }
+  function lerpKadr(a, b, f) { return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, s: a.s + (b.s - a.s) * f }; }
+  function clampKadr(k) {
+    k.s = clamp(k.s, KADR_MIN, 1);
+    k.x = clamp(k.x, 0, 1 - k.s);
+    k.y = clamp(k.y, 0, 1 - k.s);
+    return k;
+  }
+  // Zapamiętane pozycje Kadru `z.keys` (po czasie). Przed pierwszą i za ostatnią Kadr stoi,
+  // między dwiema przejeżdża liniowo. Użytkownik nie widzi „pozycji”, widzi Kadr na każdej Klatce.
+  function keyIndex(z, t) {
+    let i = 0;
+    while (i + 1 < z.keys.length && z.keys[i + 1].t <= t + 1e-6) i++;
+    return i;
+  }
+  function kadrKeys(z, t) {
+    const ks = z.keys;
+    if (t <= ks[0].t + 1e-6) return { ...ks[0].k };
+    const last = ks[ks.length - 1];
+    if (t >= last.t - 1e-6) return { ...last.k };
+    const i = keyIndex(z, t);
+    const a = ks[i], b = ks[i + 1];
+    if (Math.abs(a.t - t) < 1e-6) return { ...a.k };
+    return lerpKadr(a.k, b.k, (t - a.t) / (b.t - a.t));
+  }
+  // Czy w chwili t Kadr stoi (pozycja ustawiona albo trzymana), czy przejeżdża.
+  function kadrHolds(z, t) {
+    const ks = z.keys;
+    if (t <= ks[0].t + 1e-6 || t >= ks[ks.length - 1].t - 1e-6) return true;
+    const i = keyIndex(z, t);
+    return Math.abs(ks[i].t - t) < 1e-6 || sameKadr(ks[i].k, ks[i + 1].k);
+  }
+  function rampFactor(z, t) {
+    const L = zoomLen(z), u = t - z.at;
+    if (z.rin > 0 && u < z.rin) return clamp(u / z.rin, 0, 1);
+    if (z.rout > 0 && u > L - z.rout) return clamp((L - u) / z.rout, 0, 1);
+    return 1;
+  }
+  // Kadr widziany w chwili t (null = cały obraz): pozycja z Klatki, w Rampie rozciągnięta w stronę całości.
+  function kadrAt(z, t) {
+    const u = t - z.at;
+    if (u < -1e-6 || u >= zoomLen(z) - 1e-6) return null;
+    const f = rampFactor(z, t);
+    const k = kadrKeys(z, t);
+    return f >= 1 ? k : lerpKadr(FULL, k, f);
+  }
+  function kadrNow(t) { const z = zoomAt(t); return z ? kadrAt(z, t) : null; }
+  function setKey(z, t, k) {
+    t = quantAt(t);
+    k = clampKadr({ ...k });
+    const i = z.keys.findIndex((q) => Math.abs(q.t - t) < 1e-6);
+    if (i >= 0) z.keys[i].k = k; else { z.keys.push({ t, k }); z.keys.sort((p, q) => p.t - q.t); }
+  }
+  // Po zmianie przedziału: pozycje poza nim przepadają, a na nowej granicy zostaje to, co Kadr tam pokazywał.
+  function trimKeys(z) {
+    const lastT = frameTs(Math.max(frameIndex(z.at), frameIndex(z.end) - 1));
+    const before = z.keys.some((q) => q.t < z.at - 1e-6);
+    const after = z.keys.some((q) => q.t > lastT + 1e-6);
+    const kA = kadrKeys(z, z.at), kB = kadrKeys(z, lastT);
+    z.keys = z.keys.filter((q) => q.t >= z.at - 1e-6 && q.t <= lastT + 1e-6);
+    if (before || !z.keys.length) setKey(z, z.at, kA);
+    if (after) setKey(z, lastT, kB);
+  }
+  function fmtFactor(k) { return (1 / k.s).toFixed(1).replace('.', ',') + '×'; }
+  function fmtZoomLabel(z) {
+    const ks = z.keys, n = ks.length;
+    const first = fmtFactor(ks[0].k), last = fmtFactor(ks[n - 1].k);
+    let out = n > 1 && !sameKadr(ks[0].k, ks[n - 1].k) ? `${first} → ${last}` : first;
+    if (n > 2) {
+      const d = n % 10, h = n % 100;
+      out += ` · ${n} ${d >= 2 && d <= 4 && (h < 12 || h > 14) ? 'Kadry' : 'Kadrów'}`;
+    }
+    return out;
+  }
 
   // Zakres timeline'u: Sekwencja albo najdalej wystający Podkład (Q4 rundy 2).
   function extent() {
@@ -148,14 +246,17 @@
   function xOf(t) { const v = S.view; return (t - v.start) / (v.end - v.start) * cssWidth(); }
   function tOf(x) { const v = S.view; return v.start + x / cssWidth() * (v.end - v.start); }
 
-  // Układ pionowy: wiersz Sekwencji, wiersze Podkładów, (pasek Gniazda), linijka.
+  // Układ pionowy: wiersz Sekwencji, (wiersz Zbliżeń), wiersze Podkładów, (pasek Gniazda), linijka.
+  function zoomRowWanted() { return S.kind === 'video' && S.zooms.length > 0; }
   function layout(withStrip) {
     const rows = [];
     let y = TOP + VID_H;
+    let zoomRow = null;
+    if (zoomRowWanted()) { zoomRow = { top: y, h: ZOOM_H }; y += ZOOM_H; }
     for (const p of S.pods) { rows.push({ gen: p.gen, top: y, h: ROW_H }); y += ROW_H; }
     let stripTop = null;
     if (withStrip) { stripTop = y; y += STRIP_H; }
-    return { vidTop: TOP, vidH: VID_H, rows, stripTop, rulerTop: y, H: y + BOTTOM };
+    return { vidTop: TOP, vidH: VID_H, zoomRow, rows, stripTop, rulerTop: y, H: y + BOTTOM };
   }
 
   function stripWanted() {
@@ -224,13 +325,18 @@
     return frameTs(clamp(frameIndex(t), 0, S.N - 1));
   }
 
-  function snapTargets(except) {
+  function snapTargets(except, extra) {
     const ts = [0, S.duration, frameTs(S.left), frameTs(S.right), curTime()];
     for (const p of S.parts) ts.push(p.start);
     for (const p of S.pods) {
       if (p === except) continue;
       ts.push(p.at, podEnd(p));
     }
+    for (const z of S.zooms) {
+      if (z === except) continue;
+      ts.push(z.at, z.end);
+    }
+    if (extra) ts.push(...extra);
     return ts;
   }
 
@@ -311,6 +417,134 @@
     }
     fitView();
     ensureVisible(edge === 'out' ? podEnd(p) : p.at);
+  }
+
+  // ---------- Zbliżenia: pozycje, długość, Rampy ----------
+  // Zbliżenie trzyma pts pierwszej Klatki (`at`) i pts Klatki za ostatnią (`end`, wyłącznie), jak Suwaki.
+  // Przesuwanie zachowuje liczbę Klatek, nie sekundy: w sklejce 30 + 60 fps to nie to samo.
+  function zoomFrames(z) { return frameIndex(z.end) - frameIndex(z.at); }
+  function setZoomRange(z, ia, ib) {
+    ia = clamp(ia, 0, S.N - 1);
+    z.at = frameTs(ia);
+    z.end = frameTs(clamp(ib, ia + 1, S.N));
+  }
+  // Najbliższa granica Klatki (dla prawej Krawędzi i końca Rampy wyjścia).
+  function endIndexAt(t) {
+    if (t >= S.duration) return S.N;
+    const i = frameIndex(Math.max(0, t));
+    const t0 = frameTs(i), t1 = frameTs(i + 1);
+    return t - t0 > (t1 - t0) / 2 ? i + 1 : i;
+  }
+  // Sąsiedzi są twardą granicą: Zbliżenia nie nachodzą na siebie.
+  function zoomNeighbours(z) {
+    let lo = 0, hi = S.duration;
+    for (const o of S.zooms) {
+      if (o === z) continue;
+      if (o.end <= z.at + 1e-6) lo = Math.max(lo, o.end);
+      else if (o.at >= z.end - 1e-6) hi = Math.min(hi, o.at);
+    }
+    return { lo, hi };
+  }
+  function clampRamps(z, side) {
+    const L = zoomLen(z);
+    z.rin = clamp(z.rin, 0, L);
+    z.rout = clamp(z.rout, 0, L);
+    if (z.rin + z.rout > L + 1e-9) {
+      if (side === 'in') z.rin = Math.max(0, L - z.rout); else z.rout = Math.max(0, L - z.rin);
+    }
+  }
+  function clampZoom(z) {
+    setZoomRange(z, frameIndex(clamp(z.at, 0, S.duration)), frameIndex(clamp(z.end, 0, S.duration)));
+    const seen = new Map();
+    for (const q of z.keys) seen.set(quantAt(q.t), clampKadr(q.k));
+    z.keys = [...seen.entries()].map(([t, k]) => ({ t, k })).sort((p, q) => p.t - q.t);
+    trimKeys(z);
+    clampRamps(z);
+  }
+  function moveZoomTo(z, at, doSnap) {
+    const n = zoomFrames(z);
+    let ia = frameIndex(clamp(at, 0, S.duration));
+    if (doSnap) {
+      const targets = snapTargets(z);
+      const tA = frameTs(ia), tB = frameTs(Math.min(ia + n, S.N));
+      const sL = snap(tA, targets), sR = snap(tB, targets);
+      const dL = sL == null ? Infinity : Math.abs(xOf(sL) - xOf(tA));
+      const dR = sR == null ? Infinity : Math.abs(xOf(sR) - xOf(tB));
+      if (dL <= dR && sL != null) ia = frameIndex(sL);
+      else if (sR != null) ia = frameIndex(sR) - n;
+    }
+    const { lo, hi } = zoomNeighbours(z);
+    ia = clamp(ia, frameIndex(lo), frameIndex(hi) - n);
+    const di = ia - frameIndex(z.at);
+    for (const q of z.keys) q.t = frameTs(clamp(frameIndex(q.t) + di, 0, S.N - 1));
+    setZoomRange(z, ia, ia + n);
+    trimKeys(z);
+    clampRamps(z);
+  }
+  // Krawędź zmienia przedział; pozycje Kadru zostają na swoich Klatkach, te poza przedziałem przepadają.
+  function setZoomIn(z, L, doSnap) {
+    if (doSnap) { const s_ = snap(L, snapTargets(z)); if (s_ != null) L = s_; }
+    let ia = frameIndex(clamp(L, 0, S.duration));
+    const { lo } = zoomNeighbours(z);
+    ia = clamp(ia, frameIndex(lo), frameIndex(z.end) - 1);
+    setZoomRange(z, ia, frameIndex(z.end));
+    trimKeys(z);
+    clampRamps(z, 'in');
+  }
+  function setZoomOut(z, R, doSnap) {
+    if (doSnap) { const s_ = snap(R, snapTargets(z)); if (s_ != null) R = s_; }
+    const { hi } = zoomNeighbours(z);
+    const ib = clamp(endIndexAt(R), frameIndex(z.at) + 1, frameIndex(hi));
+    setZoomRange(z, frameIndex(z.at), ib);
+    trimKeys(z);
+    clampRamps(z, 'out');
+  }
+  // Rampy: górne rogi; własne Krawędzie są celem Przyciągania, żeby „prawie zero” było zerem.
+  function setRampIn(z, t, doSnap) {
+    if (doSnap) { const s_ = snap(t, snapTargets(z, [z.at, z.end])); if (s_ != null) t = s_; }
+    z.rin = clamp(quantAt(t) - z.at, 0, zoomLen(z) - z.rout);
+  }
+  function setRampOut(z, t, doSnap) {
+    if (doSnap) { const s_ = snap(t, snapTargets(z, [z.at, z.end])); if (s_ != null) t = s_; }
+    z.rout = clamp(z.end - frameTs(endIndexAt(t)), 0, zoomLen(z) - z.rin);
+  }
+  function stepZoom(z, part, dir, big) {
+    const ia = frameIndex(z.at), ib = frameIndex(z.end);
+    if (part === 'in') setZoomIn(z, frameTs(clamp(stepIndex(ia, dir, big), 0, S.N - 1)), false);
+    else if (part === 'out') setZoomOut(z, frameTs(clamp(stepIndex(ib, dir, big), 1, S.N)), false);
+    else if (part === 'rin') setRampIn(z, frameTs(clamp(stepIndex(frameIndex(z.at + z.rin), dir, big), 0, S.N)), false);
+    else if (part === 'rout') setRampOut(z, frameTs(clamp(stepIndex(endIndexAt(z.end - z.rout), dir, big), 0, S.N)), false);
+    else moveZoomTo(z, frameTs(clamp(stepIndex(ia, dir, big), 0, S.N - 1)), false);
+    ensureVisible(part === 'out' || part === 'rout' ? z.end : z.at);
+  }
+  function removeZoom(id) {
+    const i = S.zooms.findIndex((z) => z.id === id);
+    if (i < 0) return;
+    S.zooms.splice(i, 1);
+    if (S.sel && typeof S.sel === 'object' && S.sel.zoom === id) S.sel = null;
+    if (S.drag && S.drag.kind === 'zoom' && S.drag.id === id) S.drag = null;
+  }
+  function cancelPreviewDrag() { S.pdrag = null; }
+  // Narysowany Kadr na bieżącej Klatce: poza Zbliżeniami tworzy nowe (jedna Klatka, do wydłużenia
+  // Cieniem albo Krawędzią), wewnątrz Zbliżenia rozcina je: stare kończy się tu, nowe zaczyna z tym Kadrem.
+  function commitKadr(k) {
+    if (!S.loaded || S.kind !== 'video') return false;
+    const i = clamp(frameIndex(curTime()), 0, S.N - 1);
+    const t = frameTs(i);
+    const z = zoomAt(t);
+    if (z && Math.abs(z.at - t) < 1e-6) {
+      setKey(z, t, k);
+      S.sel = { zoom: z.id, part: null };
+      return true;
+    }
+    const nz = { id: ++S.zoomSeq, at: t, end: z ? z.end : frameTs(i + 1), rin: 0, rout: z ? z.rout : 0,
+      keys: [{ t, k: clampKadr({ ...k }) }] };
+    if (z) { z.end = t; z.rout = 0; trimKeys(z); clampRamps(z); }
+    S.zooms.push(nz);
+    S.zooms.sort((p, q) => p.at - q.at);
+    S.sel = { zoom: nz.id, part: null };
+    showStatus(`${z ? 'Zbliżenie rozcięte, nowe' : 'Zbliżenie'} ${fmtZoomLabel(nz)} ✓`, 'done', '', 2000);
+    return true;
   }
 
   function partIndexAt(t) {
@@ -406,8 +640,13 @@
     S.hoverX = null;
     S.hoverT = null;
     S.restoreT = null;
+    S.width = info.width || 0;
+    S.height = info.height || 0;
+    S.pdrag = null;
+    video.style.transform = '';
     if (reason === 'open' || !wasLoaded) {
       clearPods();
+      S.zooms = [];
       S.gain = 1;
       S.volLabel = null;
     } else {
@@ -427,6 +666,8 @@
   }
 
   // Po zmianie Sekwencji Podkłady jadą razem z obrazem (Q1 rundy 3), playhead też.
+  // Zbliżenia są przywiązane do obrazu: za wstawionym Nagraniem jadą, rozcięte przez wstawienie
+  // wydłużają się (Kadr B zostaje na swojej Klatce), a leżące choć częściowo w usuwanym znikają.
   function applyShift(prevT) {
     const sh = S.pendingShift;
     S.pendingShift = null;
@@ -435,6 +676,10 @@
       const [index, dur] = sh.inserted;
       const t0 = S.parts[index] ? S.parts[index].start : S.duration;
       for (const p of S.pods) if (p.at >= t0 - 1e-6) p.at += dur;
+      for (const z of S.zooms) {
+        if (z.at >= t0 - 1e-6) { z.at += dur; z.end += dur; for (const q of z.keys) q.t += dur; }
+        else if (z.end > t0 + 1e-6) { z.end += dur; for (const q of z.keys) if (q.t >= t0 - 1e-6) q.t += dur; }
+      }
       if (t >= t0) t += dur;
     } else if (sh && sh.removed) {
       const [t0, dur] = sh.removed;
@@ -442,9 +687,12 @@
         if (p.at >= t0 + dur - 1e-6) p.at -= dur;
         else if (p.at >= t0 - 1e-6) p.at = t0;
       }
+      S.zooms = S.zooms.filter((z) => !(z.at < t0 + dur - 1e-6 && z.end > t0 + 1e-6));
+      for (const z of S.zooms) if (z.at >= t0 + dur - 1e-6) { z.at -= dur; z.end -= dur; for (const q of z.keys) q.t -= dur; }
       if (t >= t0 + dur) t -= dur; else if (t >= t0) t = t0;
     }
     for (const p of S.pods) clampPod(p);
+    for (const z of S.zooms) clampZoom(z);
     S.restoreT = clamp(t, 0, S.duration);
   }
 
@@ -463,6 +711,7 @@
       S.left = clamp(frameIndex(lt), 0, S.N - 1);
       S.right = rightAtEnd ? S.N : clamp(frameIndex(rt), S.left + 1, S.N);
       for (const p of S.pods) clampPod(p);
+      for (const z of S.zooms) clampZoom(z);
     } catch (e) { /* ignoruj */ }
   }
 
@@ -562,6 +811,8 @@
     return {
       gain: S.gain,
       podklady: S.pods.map((p) => ({ gen: p.gen, at: p.at, tin: p.tin, tout: p.tout, gain: p.gain })),
+      zblizenia: S.zooms.map((z) => ({ at: z.at, end: z.end, rin: z.rin, rout: z.rout,
+        keys: z.keys.map((q) => ({ t: q.t, x: q.k.x, y: q.k.y, s: q.k.s })) })),
     };
   }
 
@@ -617,6 +868,7 @@
       syncPods(false);
     }
     draw();
+    drawOverlay();
     requestAnimationFrame(tick);
   }
 
@@ -777,8 +1029,9 @@
     const t = curTime();
     const xp = xOf(t);
 
-    // wiersze Podkładów: tło
-    for (const row of L.rows) {
+    // wiersze Zbliżeń i Podkładów: tło
+    const bgRows = L.zoomRow ? [L.zoomRow, ...L.rows] : L.rows;
+    for (const row of bgRows) {
       ctx.fillStyle = C.rowBg;
       ctx.fillRect(0, row.top, W, row.h);
       ctx.fillStyle = C.axis;
@@ -828,6 +1081,44 @@
           ctx.fillText(p.name, Math.max(0, x) + 4, waveTop + 2);
           ctx.restore();
         }
+      }
+    }
+
+    // Zbliżenia: pasek z podpisem krotności, Rampy jako ścięte górne rogi
+    if (L.zoomRow) {
+      const top = L.zoomRow.top, h = L.zoomRow.h;
+      const y0 = top + 4, y1 = top + h - 4;
+      ctx.textBaseline = 'top';
+      for (const z of S.zooms) {
+        const a = xOf(z.at), b = xOf(z.end);
+        if (b < 0 || a > W) continue;
+        const ax = clamp(a, -2, W + 2), bx = clamp(b, -2, W + 2);
+        const ra = clamp(xOf(z.at + z.rin), -2, W + 2), rb = clamp(xOf(z.end - z.rout), -2, W + 2);
+        const isSel = S.sel && typeof S.sel === 'object' && S.sel.zoom === z.id;
+        const part = isSel ? S.sel.part : undefined;
+        ctx.beginPath();
+        ctx.moveTo(ax, y1); ctx.lineTo(ra, y0); ctx.lineTo(rb, y0); ctx.lineTo(bx, y1); ctx.closePath();
+        ctx.fillStyle = C.zoomFill;
+        ctx.fill();
+        ctx.lineWidth = isSel && !part ? 2 : 1;
+        ctx.strokeStyle = isSel && !part ? C.handleSel : C.zoomBorder;
+        ctx.stroke();
+        for (const [px, which] of [[ra, 'rin'], [rb, 'rout']]) {
+          ctx.fillStyle = part === which ? C.handleSel : C.zoomBorder;
+          ctx.fillRect(Math.round(px) - 3, y0 - 2, 6, 6);
+        }
+        if (part === 'in' || part === 'out') {
+          ctx.fillStyle = C.handleSel;
+          ctx.fillRect(Math.round(part === 'in' ? a : b) - 1, top + 2, 3, h - 4);
+        }
+        const lx = Math.max(ax, ra), rx = Math.min(bx, rb);
+        ctx.fillStyle = C.text;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(lx + 2, top, Math.max(0, rx - lx - 4), h);
+        ctx.clip();
+        ctx.fillText(fmtZoomLabel(z), lx + 6, top + 9);
+        ctx.restore();
       }
     }
 
@@ -962,6 +1253,15 @@
       const what = edge === 'in' ? 'początek' : edge === 'out' ? 'koniec' : 'Podkład';
       labels.push({ x: xOf(tt), text: `${what} ${fmt(tt)}`, col: C.handleSel, prio: 1 });
     }
+    const sz = selZoom();
+    if (sz) {
+      const part = S.sel.part;
+      const tt = part === 'out' ? sz.end : part === 'rin' ? sz.at + sz.rin : part === 'rout' ? sz.end - sz.rout : sz.at;
+      const ramp = (r) => `Rampa ${r.toFixed(2).replace('.', ',')} s`;
+      const what = part === 'in' ? 'początek' : part === 'out' ? 'koniec'
+        : part === 'rin' ? ramp(sz.rin) : part === 'rout' ? ramp(sz.rout) : `Zbliżenie ${fmtZoomLabel(sz)}`;
+      labels.push({ x: xOf(tt), text: `${what} ${fmt(tt)}`, col: C.handleSel, prio: 1 });
+    }
     if (xp >= 0 && xp <= W) labels.push({ x: xp, text: fmt(t), col: C.text, prio: 0 });
     const gripBoxes = [];
     for (const kind of ['left', 'right']) {
@@ -1054,10 +1354,25 @@
     return null;
   }
 
-  // Co jest pod kursorem: {kind:'handle', which} | {kind:'pod', gen, edge} | {kind:'video'}
+  // Co jest pod kursorem: {kind:'handle', which} | {kind:'pod', gen, edge} | {kind:'zoom', id, part} | {kind:'video'}
   function hitTest(mx, my) {
     const L = layout(stripWanted());
     if (my < L.vidTop + L.vidH) {
+      const h = hitHandle(mx);
+      return h ? { kind: 'handle', which: h } : { kind: 'video' };
+    }
+    if (L.zoomRow && my >= L.zoomRow.top && my < L.zoomRow.top + L.zoomRow.h) {
+      // górna połowa wiersza przy rogu = Rampa, reszta = Krawędź albo środek
+      const upper = my < L.zoomRow.top + L.zoomRow.h / 2;
+      for (const z of S.zooms) {
+        const a = xOf(z.at), b = xOf(z.end);
+        const ra = xOf(z.at + z.rin), rb = xOf(z.end - z.rout);
+        const dRa = Math.abs(mx - ra), dRb = Math.abs(mx - rb);
+        if (upper && (dRa <= HIT || dRb <= HIT)) return { kind: 'zoom', id: z.id, part: dRa <= dRb ? 'rin' : 'rout' };
+        const dA = Math.abs(mx - a), dB = Math.abs(mx - b);
+        if (dA <= HIT || dB <= HIT) return { kind: 'zoom', id: z.id, part: dA <= dB ? 'in' : 'out' };
+        if (mx >= a && mx <= b) return { kind: 'zoom', id: z.id, part: null };
+      }
       const h = hitHandle(mx);
       return h ? { kind: 'handle', which: h } : { kind: 'video' };
     }
@@ -1101,6 +1416,11 @@
       const p = podByGen(h.gen);
       S.sel = { pod: h.gen, edge: h.edge };
       S.drag = { kind: 'pod', gen: h.gen, edge: h.edge, grab: tOf(mx) - p.at };
+    } else if (h.kind === 'zoom') {
+      pause();
+      const z = zoomById(h.id);
+      S.sel = { zoom: h.id, part: h.part };
+      S.drag = { kind: 'zoom', id: h.id, part: h.part, grab: tOf(mx) - z.at };
     } else {
       S.sel = null;
       S.drag = { kind: 'scrub' };
@@ -1124,14 +1444,25 @@
           else if (S.drag.edge === 'out') setPodOut(p, tOf(mx), doSnap);
           else movePodTo(p, tOf(mx) - S.drag.grab, doSnap);
         }
+      } else if (S.drag.kind === 'zoom') {
+        const z = zoomById(S.drag.id);
+        if (z) {
+          const doSnap = !e.ctrlKey;
+          const t = tOf(mx);
+          if (S.drag.part === 'in') setZoomIn(z, t, doSnap);
+          else if (S.drag.part === 'out') setZoomOut(z, t, doSnap);
+          else if (S.drag.part === 'rin') setRampIn(z, t, doSnap);
+          else if (S.drag.part === 'rout') setRampOut(z, t, doSnap);
+          else moveZoomTo(z, t - S.drag.grab, doSnap);
+        }
       } else {
         moveHandleTo(S.drag.kind, handleIndexFromX(S.drag.kind, mx));
       }
       canvas.style.cursor = 'grabbing';
     } else {
       const h = hitTest(mx, my);
-      canvas.style.cursor = h.kind === 'handle' || (h.kind === 'pod' && h.edge) ? 'ew-resize'
-        : h.kind === 'pod' ? 'grab' : 'default';
+      canvas.style.cursor = h.kind === 'handle' || (h.kind === 'pod' && h.edge) || (h.kind === 'zoom' && h.part) ? 'ew-resize'
+        : h.kind === 'pod' || h.kind === 'zoom' ? 'grab' : 'default';
     }
   });
 
@@ -1200,11 +1531,13 @@
     rep.timer = setTimeout(loop, 500);
   }
 
+  // Zaznaczone Zbliżenie nie przejmuje strzałek: chodzą po Klatkach jak bez zaznaczenia, żeby dało się
+  // ustawiać Kadr klatka po klatce. Samo Zbliżenie przesuwa Ctrl+←/→ (z Shift: 1 s).
   function stepBy(dir, big) {
     if (!S.loaded) return;
     const sp = selPod();
     if (sp) { stepPod(sp, S.sel.edge, dir, big); return; }
-    if (S.sel) {
+    if (S.sel === 'left' || S.sel === 'right') {
       const i = stepIndex(handleIndex(S.sel), dir, big);
       moveHandleTo(S.sel, i);
       ensureVisible(frameTs(handleIndex(S.sel)));
@@ -1223,17 +1556,26 @@
   }
 
   function volBy(dir, fine) {
-    if (!S.loaded || S.kind !== 'video') return;
+    if (!S.loaded || S.kind !== 'video' || selZoom()) return;
     const sp = selPod();
     setGain(sp || S, dir, fine);
   }
 
   function deleteSelected() {
     if (!S.loaded || S.busy || S.exporting) return;
+    const sz = selZoom();
+    if (sz) {
+      // Rampa to ustawienie, nie element: Delete ją zeruje, całe Zbliżenie znika przy środku/Krawędzi.
+      if (S.sel.part === 'rin') sz.rin = 0;
+      else if (S.sel.part === 'rout') sz.rout = 0;
+      else removeZoom(sz.id);
+      return;
+    }
     const sp = selPod();
     if (sp) { removePod(sp.gen); return; }
     if (S.sel) return;  // zaznaczony Suwak: Delete nic nie robi
     if (S.parts.length > 1 && window.pywebview && window.pywebview.api) {
+      cancelPreviewDrag();
       pause();
       S.busy = true;
       showStatus('Sklejanie… 0%', 'progress');
@@ -1245,6 +1587,17 @@
     if ((e.code === 'Enter' || e.code === 'NumpadEnter') && e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault();
       if (!e.repeat) doExport('small');
+      return;
+    }
+    if ((e.code === 'ArrowLeft' || e.code === 'ArrowRight') && e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      if (e.repeat) return;
+      const sz = selZoom();
+      if (!sz) return;
+      const dir = e.code === 'ArrowLeft' ? -1 : 1;
+      const big = e.shiftKey, part = S.sel.part;
+      stepZoom(sz, part, dir, big);
+      startRepeat(() => { const z = selZoom(); if (z) stepZoom(z, S.sel.part, dir, big); });
       return;
     }
     if (e.ctrlKey || e.altKey || e.metaKey) return;
@@ -1279,7 +1632,10 @@
         if (!e.repeat) doExport('full');
         break;
       case 'Escape':
-        S.sel = null;
+        if (S.pdrag) cancelPreviewDrag(); else S.sel = null;
+        break;
+      case 'KeyZ':
+        S.zKey = true;
         break;
       case 'Delete':
       case 'Backspace':
@@ -1290,7 +1646,7 @@
         e.preventDefault();
         const sp = selPod();
         if (sp) { movePodTo(sp, 0, false); fitView(); ensureVisible(sp.at); }
-        else if (S.sel) moveHandleTo(S.sel, 0);
+        else if (S.sel === 'left' || S.sel === 'right') moveHandleTo(S.sel, 0);
         else { pause(); seekFrame(0); }
         break;
       }
@@ -1298,7 +1654,7 @@
         e.preventDefault();
         const sp = selPod();
         if (sp) { movePodTo(sp, Math.max(0, S.duration - podLen(sp)), false); fitView(); ensureVisible(podEnd(sp)); }
-        else if (S.sel) moveHandleTo(S.sel, S.N);
+        else if (S.sel === 'left' || S.sel === 'right') moveHandleTo(S.sel, S.N);
         else { pause(); seekFrame(S.N - 1); }
         break;
       }
@@ -1306,8 +1662,192 @@
   });
   window.addEventListener('keyup', (e) => {
     if (e.code.startsWith('Arrow')) stopRepeat();
+    if (e.code === 'KeyZ') S.zKey = false;
   });
-  window.addEventListener('blur', stopRepeat);
+  window.addEventListener('blur', () => { stopRepeat(); S.zKey = false; });
+
+  // ---------- podgląd: Kadry (nakładka nad wideo) ----------
+  // Na pauzie widać cały obraz z obrysami Kadrów A i B Zbliżenia pod Playheadem (albo Kadru A
+  // otwartego procesu); w trakcie odtwarzania wideo dostaje transform i wygląda jak w wyniku.
+  function videoRect() {
+    const pw = previewEl.clientWidth, ph = previewEl.clientHeight;
+    if (!S.width || !S.height) return { x: 0, y: 0, w: pw, h: ph };
+    const sc = Math.min(pw / S.width, ph / S.height);
+    const w = S.width * sc, h = S.height * sc;
+    return { x: (pw - w) / 2, y: (ph - h) / 2, w, h };
+  }
+  function kadrPx(k, R) { return { x: R.x + k.x * R.w, y: R.y + k.y * R.h, w: k.s * R.w, h: k.s * R.h }; }
+  function normPt(px, py, R) { return { x: (px - R.x) / R.w, y: (py - R.y) / R.h }; }
+  function isPlaying() { return S.loaded && S.playing && !video.paused; }
+
+  // Kadr do pokazania i edycji na pauzie: Zbliżenie pod Playheadem (pozycja z tej Klatki, przerywany,
+  // gdy przejeżdża) albo Cień skrajnego Kadru zaznaczonego Zbliżenia w luce obok niego.
+  function visibleKadry() {
+    if (!S.loaded || S.kind !== 'video') return [];
+    const t = quantAt(curTime());
+    const z = zoomAt(t);
+    if (z) {
+      const k = kadrKeys(z, t);
+      return [{ k, tag: fmtFactor(k), col: C.kadr, dashed: !kadrHolds(z, t), target: { z, t } }];
+    }
+    const sz = selZoom();
+    if (!sz) return [];
+    const { lo, hi } = zoomNeighbours(sz);
+    if (t < sz.at && t >= lo - 1e-6) {
+      return [{ k: { ...sz.keys[0].k }, tag: 'Cień', col: C.kadrGhost, dashed: true, target: { z: sz, t, extend: 'in' } }];
+    }
+    if (t >= sz.end - 1e-6 && t < hi - 1e-6) {
+      return [{ k: { ...sz.keys[sz.keys.length - 1].k }, tag: 'Cień', col: C.kadrGhost, dashed: true, target: { z: sz, t, extend: 'out' } }];
+    }
+    return [];
+  }
+  // Edycja na Klatce zapamiętuje pozycję w tej Klatce; złapany Cień najpierw wydłuża przedział.
+  function applyKadr(target, k) {
+    const z = target.z;
+    if (target.extend === 'in') { setZoomRange(z, frameIndex(target.t), frameIndex(z.end)); target.extend = null; }
+    else if (target.extend === 'out') { setZoomRange(z, frameIndex(z.at), frameIndex(target.t) + 1); target.extend = null; }
+    setKey(z, target.t, k);
+    clampRamps(z);
+  }
+  // Rysowanie: przekątna gestu, dłuższy bok wygrywa, proporcje obrazu, min. KADR_MIN.
+  function kadrFromDrag(p0, p1) {
+    const dx = p1.x - p0.x, dy = p1.y - p0.y;
+    const s_ = clamp(Math.max(Math.abs(dx), Math.abs(dy)), KADR_MIN, 1);
+    return clampKadr({ x: dx >= 0 ? p0.x : p0.x - s_, y: dy >= 0 ? p0.y : p0.y - s_, s: s_ });
+  }
+  // Zmiana wielkości za róg: przeciwległy róg stoi w miejscu, Kadr nie wychodzi poza obraz.
+  function resizeKadr(k0, corner, p) {
+    const fx = corner.includes('w') ? k0.x + k0.s : k0.x;
+    const fy = corner.includes('n') ? k0.y + k0.s : k0.y;
+    let s_ = Math.max(Math.abs(p.x - fx), Math.abs(p.y - fy));
+    const maxS = Math.min(corner.includes('w') ? fx : 1 - fx, corner.includes('n') ? fy : 1 - fy);
+    s_ = clamp(s_, KADR_MIN, Math.max(KADR_MIN, maxS));
+    return clampKadr({ x: corner.includes('w') ? fx - s_ : fx, y: corner.includes('n') ? fy - s_ : fy, s: s_ });
+  }
+  function hitKadr(px, py) {
+    const R = videoRect();
+    const vis = visibleKadry();
+    let best = null, bestD = CORNER + 3;
+    for (const v of vis) {
+      const r = kadrPx(v.k, R);
+      for (const [c, cx, cy] of [['nw', r.x, r.y], ['ne', r.x + r.w, r.y], ['sw', r.x, r.y + r.h], ['se', r.x + r.w, r.y + r.h]]) {
+        const d = Math.hypot(px - cx, py - cy);
+        if (d < bestD) { bestD = d; best = { kind: 'resize', v, corner: c }; }
+      }
+    }
+    if (best) return best;
+    let inside = null;
+    for (const v of vis) {
+      const r = kadrPx(v.k, R);
+      if (px >= r.x && px <= r.x + r.w && py >= r.y && py <= r.y + r.h && (!inside || v.k.s < inside.k.s)) inside = v;
+    }
+    return inside ? { kind: 'move', v: inside } : null;
+  }
+
+  ov.addEventListener('pointerdown', (e) => {
+    if (!S.loaded || S.kind !== 'video' || e.button !== 0) return;
+    const R = videoRect();
+    const p = normPt(e.offsetX, e.offsetY, R);
+    if (S.zKey) {
+      pause();
+      try { ov.setPointerCapture(e.pointerId); } catch (err) { /* syntetyczne zdarzenia */ }
+      S.pdrag = { kind: 'draw', p0: p, px0: e.offsetX, py0: e.offsetY, kadr: null, moved: false };
+      return;
+    }
+    if (isPlaying()) return;
+    const h = hitKadr(e.offsetX, e.offsetY);
+    if (!h) return;
+    try { ov.setPointerCapture(e.pointerId); } catch (err) { /* */ }
+    if (h.kind === 'move') S.pdrag = { kind: 'move', target: h.v.target, k0: { ...h.v.k }, grab: { x: p.x - h.v.k.x, y: p.y - h.v.k.y } };
+    else S.pdrag = { kind: 'resize', target: h.v.target, k0: { ...h.v.k }, corner: h.corner };
+  });
+  ov.addEventListener('pointermove', (e) => {
+    if (!S.loaded || S.kind !== 'video') return;
+    const R = videoRect();
+    const p = normPt(e.offsetX, e.offsetY, R);
+    const d = S.pdrag;
+    if (d) {
+      if (d.kind === 'draw') {
+        if (Math.hypot(e.offsetX - d.px0, e.offsetY - d.py0) >= 4) d.moved = true;
+        if (d.moved) d.kadr = kadrFromDrag(d.p0, p);
+      } else if (d.kind === 'move') {
+        applyKadr(d.target, { x: p.x - d.grab.x, y: p.y - d.grab.y, s: d.k0.s });
+      } else {
+        applyKadr(d.target, resizeKadr(d.k0, d.corner, p));
+      }
+      ov.style.cursor = d.kind === 'draw' ? 'crosshair' : 'grabbing';
+      return;
+    }
+    if (S.zKey) { ov.style.cursor = 'crosshair'; return; }
+    const h = isPlaying() ? null : hitKadr(e.offsetX, e.offsetY);
+    ov.style.cursor = !h ? 'default' : h.kind === 'move' ? 'move'
+      : (h.corner === 'nw' || h.corner === 'se') ? 'nwse-resize' : 'nesw-resize';
+  });
+  function endPreviewDrag(e) {
+    const d = S.pdrag;
+    if (!d) return;
+    S.pdrag = null;
+    try { ov.releasePointerCapture(e.pointerId); } catch (err) { /* */ }
+    if (d.kind === 'draw' && d.moved && d.kadr) commitKadr(d.kadr);
+  }
+  ov.addEventListener('pointerup', endPreviewDrag);
+  ov.addEventListener('pointercancel', endPreviewDrag);
+  ov.addEventListener('pointerleave', () => { if (!S.pdrag) ov.style.cursor = 'default'; });
+
+  function drawKadr(r, tag, col, dashed, handles) {
+    octx.setLineDash(dashed ? [6, 4] : []);
+    octx.lineWidth = 2;
+    octx.strokeStyle = col;
+    octx.strokeRect(Math.round(r.x) + 0.5, Math.round(r.y) + 0.5, Math.round(r.w) - 1, Math.round(r.h) - 1);
+    octx.setLineDash([]);
+    if (handles) {
+      octx.fillStyle = col;
+      for (const [cx, cy] of [[r.x, r.y], [r.x + r.w, r.y], [r.x, r.y + r.h], [r.x + r.w, r.y + r.h]]) {
+        octx.fillRect(Math.round(cx) - CORNER / 2, Math.round(cy) - CORNER / 2, CORNER, CORNER);
+      }
+    }
+    if (tag) {
+      octx.font = '12px "Segoe UI", system-ui, sans-serif';
+      octx.textBaseline = 'top';
+      octx.textAlign = 'left';
+      const tw = octx.measureText(tag).width + 10;
+      octx.fillStyle = col;
+      octx.fillRect(r.x + 6, r.y + 6, tw, 18);
+      octx.fillStyle = '#111';
+      octx.fillText(tag, r.x + 11, r.y + 8);
+    }
+  }
+
+  function drawOverlay() {
+    const dpr = window.devicePixelRatio || 1;
+    const pw = previewEl.clientWidth || 1, ph = previewEl.clientHeight || 1;
+    const w = Math.round(pw * dpr), h = Math.round(ph * dpr);
+    if (ov.width !== w || ov.height !== h) { ov.width = w; ov.height = h; }
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    octx.clearRect(0, 0, pw, ph);
+    const playing = isPlaying();
+    const k = playing && S.kind === 'video' ? kadrNow(curTime()) : null;
+    if (k && (k.s < 1 - 1e-6 || k.x > 1e-6 || k.y > 1e-6)) {
+      const R = videoRect();
+      const f = 1 / k.s;
+      const tx = R.x - (R.x + k.x * R.w) * f, ty = R.y - (R.y + k.y * R.h) * f;
+      video.style.transform = `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${f.toFixed(4)})`;
+    } else if (video.style.transform) {
+      video.style.transform = '';
+    }
+    if (!S.loaded || S.kind !== 'video' || playing) return;
+    const R = videoRect();
+    const vis = visibleKadry();
+    for (const v of vis) drawKadr(kadrPx(v.k, R), v.tag, v.col, v.dashed, true);
+    // w Rampie obraz jest jeszcze między całością a Kadrem: to, co widać, białą przerywaną linią
+    const t = curTime();
+    const z = zoomAt(t);
+    if (z) {
+      const kn = kadrAt(z, t);
+      if (kn && !vis.some((v) => sameKadr(v.k, kn))) drawKadr(kadrPx(kn, R), '', C.kadrNow, true, false);
+    }
+    if (S.pdrag && S.pdrag.kind === 'draw' && S.pdrag.kadr) drawKadr(kadrPx(S.pdrag.kadr, R), '', C.kadr, false, true);
+  }
 
   // ---------- drag & drop ----------
   // Ścieżki plików zna tylko Python (pywebview dokleja je natywnie i wysyła zdarzenie
@@ -1376,9 +1916,9 @@
     const snap = S.lastDrop && performance.now() - S.lastDrop.t < 3000 ? S.lastDrop : null;
     S.lastDrop = null;
     if (snap && (x == null || y == null)) { x = snap.x; y = snap.y; }
-    if (!S.loaded || x == null || y == null) { api.open_path(paths[0]); return 'open'; }
+    if (!S.loaded || x == null || y == null) { cancelPreviewDrag(); api.open_path(paths[0]); return 'open'; }
     const prevRect = snap ? snap.preview : previewEl.getBoundingClientRect();
-    if (overPreview(x, y, prevRect)) { api.open_path(paths[0]); return 'open'; }
+    if (overPreview(x, y, prevRect)) { cancelPreviewDrag(); api.open_path(paths[0]); return 'open'; }
     const rect = snap ? snap.canvas : canvas.getBoundingClientRect();
     const mx = x - rect.left, my = y - rect.top;
     if (mx < 0 || mx > rect.width) return 'none';
@@ -1391,6 +1931,7 @@
         showStatus(`Do Sekwencji można wstawić tylko ${seqExt().slice(1).toUpperCase()}`, 'error', '', 4000);
         return 'reject';
       }
+      cancelPreviewDrag();
       pause();
       S.busy = true;
       showStatus('Sklejanie… 0%', 'progress');
@@ -1416,6 +1957,7 @@
   if (window.pywebview && window.pywebview.api) announceReady();
   else window.addEventListener('pywebviewready', announceReady);
 
-  window.__ciach = { S, frameTs, frameIndex, video, dropFiles, layout, extent, podByGen };
+  window.__ciach = { S, frameTs, frameIndex, video, dropFiles, layout, extent, podByGen,
+    zoomAt, kadrAt, kadrKeys, commitKadr, visibleKadry, videoRect, ov };
   requestAnimationFrame(tick);
 })();

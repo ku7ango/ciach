@@ -13,4 +13,5 @@ Ciach_error.log
 tests/_*
 tests/t*.png
 tests/s*.png
+tests/z*.png
 tests/__pycache__/

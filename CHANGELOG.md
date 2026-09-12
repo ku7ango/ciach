@@ -2,6 +2,26 @@
 
 Sekcja dla tagu `vX.Y` trafia do opisu release'u na GitHubie (workflow `release.yml`).
 
+## v1.2
+
+### Zbliżenie (powiększenie fragmentu obrazu)
+
+- Z + przeciągnięcie po obrazie rysuje Kadr i tworzy zbliżenie o długości jednej klatki.
+  Na dalszych klatkach złap szary cień Kadru, żeby wydłużyć zbliżenie; na każdej klatce
+  zbliżenia Kadr da się przesunąć (środek) i przeskalować (róg), a ustawiona pozycja jest
+  zapamiętana w tej klatce. Między pozycjami Kadr przejeżdża (przerywana linia), poza nimi
+  stoi. Kadr trzyma proporcje filmu, najmniejszy 20 % szerokości (5×).
+- Z + przeciągnięcie wewnątrz zbliżenia rozcina je na dwa stykające się ze sobą.
+- Zbliżenia mają własny wiersz na timeline: środek przesuwa, krawędź zmienia długość, górny
+  róg wyciąga rampę (płynne wejście/wyjście). Przyciąganie jak przy podkładzie, Ctrl wyłącza.
+  Nie nachodzą na siebie.
+- W trakcie odtwarzania podgląd pokazuje zbliżenie jak w wyniku; na pauzie cały obraz z Kadrem.
+- Przy zaznaczonym zbliżeniu ←/→ i Home/End chodzą po klatkach; zbliżenie, krawędź albo rampę
+  przesuwa Ctrl+←/→ (Ctrl+Shift: 1 s). Delete usuwa (na rampie: zeruje rampę), Esc odznacza.
+- Ciach i mały ciach powiększają Kadr do rozdzielczości źródła; bez zbliżeń polecenia
+  ffmpeg są takie jak dotąd.
+- Ekran startowy wymienia wszystkie skróty.
+
 ## v1.1
 
 ### Sklejanie nagrań (Sekwencja)

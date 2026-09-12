@@ -51,6 +51,31 @@ Słownik pojęć (Fragment, Suwak, Ciach, Mały Ciach) jest w `CONTEXT.md`.
 - podkład może wystawać za koniec filmu (timeline się wtedy wydłuża); przy ciachu liczy się
   tylko fragment między suwakami. Dźwięk filmu i podkłady miksują się do jednej ścieżki AAC
   192 kbit/s; bez podkładów i przy głośności 100 % dźwięk jest kopiowany 1:1 jak dotąd.
+### Zbliżenie (powiększenie fragmentu obrazu)
+
+- przytrzymaj **Z** i przeciągnij myszą po obrazie: powstaje Kadr (prostokąt w proporcjach
+  filmu, najmniejszy 20 % szerokości, czyli 5×) i zbliżenie o długości jednej klatki, od razu
+  zaznaczone. Przejdź na dalsze klatki: poza zbliżeniem widać szary cień Kadru; złap go
+  i ustaw, a zbliżenie wydłuży się do tej klatki. Na każdej klatce zbliżenia jest Kadr do
+  złapania (środek przesuwa, róg skaluje); ustawienie go na klatce zapamiętuje tę pozycję.
+  Między dwiema zapamiętanymi pozycjami Kadr przejeżdża liniowo (rysowany przerywaną linią),
+  przed pierwszą i za ostatnią stoi w miejscu. Kierunek można zmieniać dowolnie wiele razy
+  w jednym zbliżeniu.
+- Z + przeciągnięcie wewnątrz zbliżenia rozcina je: stare kończy się na tej klatce, nowe
+  zaczyna tu z nowym Kadrem (pozycje starego za tą klatką przepadają). Z + klik nic nie robi.
+- zbliżenia mają własny wiersz pod filmem (nad podkładami). Środek paska przesuwa całość
+  razem z pozycjami, krawędź zmienia długość (wydłużenie: skrajna pozycja trzyma, skrócenie:
+  pozycje poza nowym końcem przepadają), górny róg wyciąga rampę: płynne wejście z całego
+  obrazu w Kadr albo wyjście z Kadru; Kadr może się w rampie ruszać. Przyciąganie i Ctrl jak
+  przy podkładzie; zbliżenia nie nachodzą na siebie, sąsiad jest twardą granicą.
+- na pauzie widać cały obraz z Kadrem z tej klatki (w rampie dodatkowo biały przerywany
+  prostokąt: to, co w tej chwili naprawdę widać). W trakcie odtwarzania podgląd pokazuje
+  zbliżenie tak, jak wyjdzie w pliku. Esc zdejmuje zaznaczenie (cień znika).
+- przy zaznaczonym zbliżeniu ←/→ i Home/End nadal chodzą po klatkach (żeby ustawiać Kadr
+  klatka po klatce); samo zbliżenie, jego krawędź albo rampę przesuwa Ctrl+←/→ (Ctrl+Shift: 1 s).
+  Delete usuwa zbliżenie, Delete na zaznaczonej rampie tylko ją zeruje. Usunięcie nagrania usuwa zbliżenia, które w nim leżały.
+- w wyniku (ciach i mały ciach) Kadr jest powiększany do rozdzielczości źródła.
+
 Plik źródłowy nigdy nie jest zmieniany. Sklejone nagrania trafiają jako jeden plik tymczasowy do
 folderu tymczasowego systemu i znikają po zamknięciu okna. Postęp eksportu widać w rogu okna i w pasku tytułu.
 Zamknięcie okna w trakcie eksportu przerywa go i usuwa niedokończony plik.
@@ -82,4 +107,4 @@ exe na GitHubie i podepnie go pod release.
 
 Ustawienie zmiennej `CIACH_DEBUG=1` włącza endpoint `POST /debug/js` na lokalnym porcie
 (wykonuje JS w oknie), a `CIACH_PORTFILE=<ścieżka>` zapisuje numer portu do pliku.
-Służy wyłącznie do automatycznych testów UI (`tests/drive_ui.py`, `tests/drive_seq.py`); domyślnie wyłączone.
+Służy wyłącznie do automatycznych testów UI (`tests/drive_ui.py`, `tests/drive_seq.py`, `tests/drive_zoom.py`); domyślnie wyłączone.

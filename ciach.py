@@ -50,6 +50,9 @@ SMALL_FACTORS = [0.98, 0.92, 0.85]
 SMALL_BPP = 0.05  # bity na piksel na klatkę, poniżej których schodzimy z fps / rozdzielczością
 SMALL_HEIGHTS = [540, 360]
 SMALL_MP3_RATES = [128_000, 96_000, 64_000]
+KADR_MIN = 0.2  # najmniejszy Kadr: 20 % obrazu (5×)
+ZOOM_CMD = "zoom.cmd"  # plik poleceń sendcmd w katalogu tymczasowym eksportu (ffmpeg dostaje cwd)
+ZOOM_EPS = 0.0005  # zapas jak przy cięciu: klatka o znaczniku `at` wchodzi do przedziału
 
 
 def find_tool(name: str) -> str:
@@ -630,11 +633,145 @@ class App:
                 return {"ok": False, "message": "Brak pliku."}
             if end <= start:
                 return {"ok": False, "message": "Pusty zakres."}
+            zooms = self.resolve_zoom(m, (mix or {}).get("zblizenia"))
             mix = self.resolve_mix(m, mix or {})
             self.export_active = True
         target = self.run_small_export if mode == "small" else self.run_export
-        threading.Thread(target=target, args=(m, float(start), float(end), mix), daemon=True).start()
+        threading.Thread(target=target, args=(m, float(start), float(end), mix, zooms), daemon=True).start()
         return {"ok": True}
+
+    @staticmethod
+    def kadr(k) -> dict:
+        """Kadr: prostokąt w proporcjach obrazu, jako ułamki szerokości/wysokości (x, y, s)."""
+        k = k if isinstance(k, dict) else {}
+        s_ = max(KADR_MIN, min(1.0, float(k.get("s", 1.0))))
+        x = max(0.0, min(1.0 - s_, float(k.get("x", 0.0))))
+        y = max(0.0, min(1.0 - s_, float(k.get("y", 0.0))))
+        return {"x": x, "y": y, "s": s_}
+
+    def resolve_zoom(self, m: Media, spec) -> list[dict]:
+        """Zbliżenia z UI: [{at, end, rin, rout, keys: [{t, x, y, s}]}] w sekundach Sekwencji; `keys` to
+        pozycje Kadru zapamiętane na Klatkach. Odrzuca puste i porządkuje po czasie; nachodzące na siebie
+        UI nie wysyła, ale na wszelki wypadek późniejsze z nachodzącej pary jest pomijane."""
+        out: list[dict] = []
+        if m.kind != "video" or not m.width or not isinstance(spec, list):
+            return out
+        for z in spec:
+            try:
+                at, end = float(z["at"]), float(z["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end - at <= 0:
+                continue
+            rin = max(0.0, float(z.get("rin", 0.0) or 0.0))
+            rout = max(0.0, float(z.get("rout", 0.0) or 0.0))
+            if rin + rout > end - at:
+                k = (end - at) / (rin + rout)
+                rin, rout = rin * k, rout * k
+            keys: dict[float, dict] = {}
+            for q in z.get("keys") or []:
+                try:
+                    t = max(at, min(end, float(q["t"])))
+                except (KeyError, TypeError, ValueError):
+                    continue
+                keys[round(t, 6)] = self.kadr(q)
+            if not keys:
+                continue
+            out.append({"at": at, "end": end, "rin": rin, "rout": rout,
+                        "keys": [{"t": t, "k": keys[t]} for t in sorted(keys)]})
+        out.sort(key=lambda z: z["at"])
+        clean: list[dict] = []
+        for z in out:
+            if clean and z["at"] < clean[-1]["end"] - 1e-6:
+                continue
+            clean.append(z)
+        return clean
+
+    @staticmethod
+    def kadr_keys(z: dict, t: float) -> dict:
+        """Kadr z zapamiętanych pozycji: przed pierwszą i za ostatnią stoi, między dwiema liniowo."""
+        ks = z["keys"]
+        if t <= ks[0]["t"] + 1e-9:
+            return ks[0]["k"]
+        if t >= ks[-1]["t"] - 1e-9:
+            return ks[-1]["k"]
+        i = 0
+        while i + 1 < len(ks) and ks[i + 1]["t"] <= t + 1e-9:
+            i += 1
+        a, b = ks[i], ks[i + 1]
+        f = (t - a["t"]) / (b["t"] - a["t"])
+        return {q: a["k"][q] + (b["k"][q] - a["k"][q]) * f for q in ("x", "y", "s")}
+
+    @staticmethod
+    def ramp_factor(z: dict, t: float) -> float:
+        L, u = z["end"] - z["at"], t - z["at"]
+        if z["rin"] > 0 and u < z["rin"]:
+            return max(0.0, min(1.0, u / z["rin"]))
+        if z["rout"] > 0 and u > L - z["rout"]:
+            return max(0.0, min(1.0, (L - u) / z["rout"]))
+        return 1.0
+
+    @classmethod
+    def zoom_commands(cls, zooms: list[dict], pre: float, width: int, height: int) -> str:
+        """Plik dla filtra sendcmd: odcinki Zbliżeń jako polecenia dla `crop` (patrz
+        agent_docs/export_pipeline.md). Czas w grafie to czas Sekwencji minus `pre` (wejściowy
+        -ss), z tym samym zapasem 0,5 ms co przy cięciu. Odcinek ze stałym Kadrem to jedno
+        polecenie `[enter]`, odcinek z ruchem to `[expr]` liczone dla każdej klatki z TI (0..1
+        w obrębie odcinka). Kadr między pozycjami i współczynnik Rampy są liniowe w TI, więc ich
+        złożenie jest kwadratowe: `c0+c1*TI+c2*TI*TI`. Bez przecinków w wyrażeniach: przecinek
+        rozdziela polecenia."""
+        full = (float(width), float(height), 0.0, 0.0)
+
+        def px(k):
+            return (width * k["s"], height * k["s"], width * k["x"], height * k["y"])
+
+        def seen(z, t):
+            """(w, h, x, y) widziane w chwili t: Kadr z pozycji rozciągnięty Rampą w stronę całości."""
+            b = px(cls.kadr_keys(z, t))
+            f = cls.ramp_factor(z, t)
+            return tuple(fv + (bv - fv) * f for fv, bv in zip(full, b))
+
+        def seg(t0, t1, v0, v1, mid):
+            if t1 - t0 <= 1e-9:
+                return None
+            a, b = f"{t0 - pre - ZOOM_EPS:.6f}", f"{t1 - pre - ZOOM_EPS:.6f}"
+            names = ("w", "h", "x", "y")
+            if all(abs(p - q) < 1e-6 and abs(p - r) < 1e-6 for p, q, r in zip(v0, v1, mid)):
+                return f"{a}-{b} " + ", ".join(f"[enter] crop {n} {v:.2f}" for n, v in zip(names, v0)) + ";"
+            parts = []
+            for n, p0, p1, pm in zip(names, v0, v1, mid):
+                # kwadrat przez trzy punkty TI = 0, 0.5, 1
+                c2 = 2 * (p1 - 2 * pm + p0)
+                c1 = p1 - p0 - c2
+                parts.append(f"[expr] crop {n} '{p0:.2f}+{c1:.2f}*TI+{c2:.2f}*TI*TI'")
+            return f"{a}-{b} " + ", ".join(parts) + ";"
+
+        lines: list[str] = []
+        for i, z in enumerate(zooms):
+            at, end = z["at"], z["end"]
+            pts = {at, end, at + z["rin"], end - z["rout"]}
+            pts |= {q["t"] for q in z["keys"] if at < q["t"] < end}
+            pts_s = sorted(pts)
+            for t0, t1 in zip(pts_s, pts_s[1:]):
+                part = seg(t0, t1, seen(z, t0), seen(z, t1), seen(z, (t0 + t1) / 2))
+                if part:
+                    lines.append(part)
+            nxt = zooms[i + 1]["at"] if i + 1 < len(zooms) else end + 1e9
+            if nxt - end > 1e-6:
+                lines.append(seg(end, nxt, full, full, full))
+        return "\n".join(lines) + "\n"
+
+    def write_zoom_file(self, tmp: str, zooms: list[dict], m: Media, start: float) -> str:
+        path = os.path.join(tmp, ZOOM_CMD)
+        with open(path, "w", encoding="ascii") as f:
+            f.write(self.zoom_commands(zooms, self.pre_seek(start), m.width, m.height))
+        return path
+
+    @staticmethod
+    def zoom_chain(out_w: int, out_h: int) -> list[str]:
+        """Łańcuch wideo Zbliżenia: sendcmd steruje crop per klatka, scale wyrównuje do stałego
+        rozmiaru wyjścia (scale jako jedyny filtr przyjmuje zmienny rozmiar klatek wejściowych)."""
+        return [f"sendcmd=f={ZOOM_CMD}", "crop=w=iw:h=ih:x=0:y=0", f"scale={out_w}:{out_h}"]
 
     def resolve_mix(self, m: Media, mix: dict) -> dict | None:
         """Zamienia gen Podkładów na ścieżki i odrzuca miks, który nic nie zmienia (kopia 1:1)."""
@@ -717,7 +854,7 @@ class App:
         return ["-ss", f"{pre:.6f}", "-i", m.path, *(extra_inputs or []), "-ss", f"{oss:.6f}", "-t", f"{dur:.6f}"]
 
     def build_small_cmd(self, m: Media, start: float, end: float, out: str, plan: dict,
-                        pass_no: int, passlog: str, mix: dict | None = None) -> list[str]:
+                        pass_no: int, passlog: str, mix: dict | None = None, zoom: bool = False) -> list[str]:
         extra_inputs: list[str] = []
         mix_filters: list[str] = []
         mix_label = ""
@@ -727,9 +864,15 @@ class App:
                *self.seek_args(m, start, end, extra_inputs)]
         filters: list[str] = []
         vf: list[str] = []
+        if zoom:
+            # Zbliżenie skaluje od razu do rozmiaru z planu: crop daje klatki o zmiennym rozmiarze,
+            # a `-2:h` liczyłoby szerokość dla każdej z osobna (raz 960, raz 958).
+            oh = plan["height"] if plan["scale"] else m.height
+            ow = int(round(m.width * oh / m.height / 2)) * 2
+            vf += self.zoom_chain(ow, oh)
         if plan["fps_change"]:
             vf.append(f"fps={plan['fps']:g}")
-        if plan["scale"]:
+        if plan["scale"] and not zoom:
             vf.append(f"scale=-2:{plan['height']}")
         if vf:
             filters.append(f"[0:v:0]{','.join(vf)}[v]")
@@ -786,7 +929,8 @@ class App:
         except OSError:
             pass
 
-    def run_small_export(self, m: Media, start: float, end: float, mix: dict | None = None):
+    def run_small_export(self, m: Media, start: float, end: float, mix: dict | None = None,
+                         zooms: list[dict] | None = None):
         stem, ext = os.path.splitext(m.display_name)
         out = self.unique_out(stem, ext.lower(), "_ciach_maly")
         tmp = tempfile.mkdtemp(prefix="ciach_")
@@ -794,6 +938,9 @@ class App:
         self.export_tmp = tmp
         dur = end - start
         state = {"attempt": 1}
+        zoom = bool(zooms) and m.kind == "video"
+        if zoom:
+            self.write_zoom_file(tmp, zooms, m, start)
 
         def progress(pct: float):
             self.emit("export", state="progress", mode="small", percent=round(pct), attempt=state["attempt"])
@@ -821,9 +968,9 @@ class App:
                                             streams, factor)
                     passlog = os.path.join(tmp, f"pass{attempt}")
                     for pass_no in (1, 2):
-                        cmd = self.build_small_cmd(m, start, end, out, plan, pass_no, passlog, mix)
+                        cmd = self.build_small_cmd(m, start, end, out, plan, pass_no, passlog, mix, zoom)
                         base = 50.0 * (pass_no - 1)
-                        rc, err = self.run_ffmpeg_export(cmd, dur, m, lambda p, b=base: progress(b + p / 2))
+                        rc, err = self.run_ffmpeg_export(cmd, dur, m, lambda p, b=base: progress(b + p / 2), cwd=tmp)
                         if cancelled():
                             return
                         if rc != 0:
@@ -888,7 +1035,7 @@ class App:
                 time.sleep(0.2)
 
     def build_cmd(self, m: Media, start: float, end: float, out: str, encoder: str,
-                  mix: dict | None = None) -> list[str]:
+                  mix: dict | None = None, zoom: bool = False) -> list[str]:
         # Dwustopniowy seek: wejściowy -ss do ~3 s przed cięciem (szybki skok do
         # klatki kluczowej), wyjściowy -ss dokładnie na cięcie. Dzięki temu
         # kopiowane strumienie (audio) też zaczynają się w miejscu cięcia, a nie
@@ -897,28 +1044,33 @@ class App:
         head = [FFMPEG, "-y", "-hide_banner", "-v", "error", "-nostats", "-progress", "pipe:1"]
         if m.kind == "video":
             venc = NVENC_ARGS if encoder == "nvenc" else X264_ARGS
+            vfilters = [f"[0:v:0]{','.join(self.zoom_chain(m.width, m.height))}[v]"] if zoom else []
+            vmap = "[v]" if zoom else "0:v:0"
             if mix:
                 # Podkłady albo Głośność: jedna ścieżka AAC z miksu (patrz export_pipeline.md).
                 inputs, filters, label = self.mix_filters(m, start, end, mix, self.pre_seek(start))
-                return head + [*self.seek_args(m, start, end, inputs), "-filter_complex", ";".join(filters),
-                               "-map", "0:v:0", "-map", label, *venc, *VIDEO_TB, "-pix_fmt", "yuv420p",
+                return head + [*self.seek_args(m, start, end, inputs), "-filter_complex", ";".join(vfilters + filters),
+                               "-map", vmap, "-map", label, *venc, *VIDEO_TB, "-pix_fmt", "yuv420p",
                                "-c:a", "aac", "-b:a", str(MIX_AUDIO_RATE), "-movflags", "+faststart", out]
-            return head + [*self.seek_args(m, start, end), "-map", "0:v:0", "-map", "0:a?", *venc, *VIDEO_TB,
+            fc = ["-filter_complex", ";".join(vfilters)] if zoom else []
+            return head + [*self.seek_args(m, start, end), *fc, "-map", vmap, "-map", "0:a?", *venc, *VIDEO_TB,
                            "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out]
         return head + [*self.seek_args(m, start, end), "-map", "0", "-c", "copy", "-map_metadata", "0",
                        "-id3v2_version", "3", "-avoid_negative_ts", "make_zero", out]
 
-    def run_ffmpeg_export(self, cmd: list[str], dur: float, m: Media, on_progress=None) -> tuple[int, str]:
+    def run_ffmpeg_export(self, cmd: list[str], dur: float, m: Media, on_progress=None,
+                          cwd: str | None = None) -> tuple[int, str]:
         if on_progress is None:
             def on_progress(pct: float):
                 self.emit("export", state="progress", mode="full", percent=round(pct))
                 self.set_title(f"{APP_NAME} – {round(pct)}% – {m.display_name}")
-        return self.run_ffmpeg(cmd, dur, on_progress, attr="export_proc")
+        return self.run_ffmpeg(cmd, dur, on_progress, attr="export_proc", cwd=cwd)
 
-    def run_ffmpeg(self, cmd: list[str], dur: float, on_progress, attr: str) -> tuple[int, str]:
+    def run_ffmpeg(self, cmd: list[str], dur: float, on_progress, attr: str, cwd: str | None = None) -> tuple[int, str]:
         """Uruchamia ffmpeg z `-progress pipe:1`, woła on_progress(procent) co ~0,2 s.
-        Uchwyt procesu trzymany w `self.<attr>`, żeby dało się go zabić przy zamykaniu."""
-        p = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        Uchwyt procesu trzymany w `self.<attr>`, żeby dało się go zabić przy zamykaniu.
+        `cwd`: katalog z plikiem poleceń Zbliżenia (ścieżka względna omija escapowanie w filtergraph)."""
+        p = popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd)
         setattr(self, attr, p)
         err_chunks: list[bytes] = []
 
@@ -946,7 +1098,8 @@ class App:
         setattr(self, attr, None)
         return p.returncode, b"".join(err_chunks).decode("utf-8", "replace")
 
-    def run_export(self, m: Media, start: float, end: float, mix: dict | None = None):
+    def run_export(self, m: Media, start: float, end: float, mix: dict | None = None,
+                   zooms: list[dict] | None = None):
         stem, ext = os.path.splitext(m.display_name)
         out = self.unique_out(stem, ext.lower())
         self.export_out = out
@@ -954,12 +1107,18 @@ class App:
         self.set_title(f"{APP_NAME} – 0% – {m.display_name}")
         self.encoder_ready.wait(timeout=60)
         encoder = self.encoder or "x264"
+        zoom = bool(zooms) and m.kind == "video"
+        tmp = None
         try:
+            if zoom:
+                tmp = tempfile.mkdtemp(prefix="ciach_")
+                self.export_tmp = tmp
+                self.write_zoom_file(tmp, zooms, m, start)
             attempts = [encoder] if (m.kind != "video" or encoder == "x264") else ["nvenc", "x264"]
             rc, err, cmd = 1, "", []
             for enc in attempts:
-                cmd = self.build_cmd(m, start, end, out, enc, mix)
-                rc, err = self.run_ffmpeg_export(cmd, end - start, m)
+                cmd = self.build_cmd(m, start, end, out, enc, mix, zoom)
+                rc, err = self.run_ffmpeg_export(cmd, end - start, m, cwd=tmp)
                 if rc == 0:
                     break
                 if enc == "nvenc":
@@ -990,9 +1149,12 @@ class App:
                 pass
             self.emit("export", state="error", mode="full", message=str(e)[:200])
         finally:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
             with self.lock:
                 self.export_active = False
                 self.export_out = None
+                self.export_tmp = None
             if self.media is m:
                 self.set_title(self.title_for(m))
 
