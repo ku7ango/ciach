@@ -33,8 +33,34 @@ Słownik pojęć (Fragment, Suwak, Ciach, Mały Ciach) jest w `CONTEXT.md`.
   naraz wchodzi w kolejności nazw. Suwaki po sklejeniu obejmują całość, wynik nazywa się po
   pierwszym nagraniu.
 - Delete / Backspace bez zaznaczenia: usuwa nagranie, w którym stoi playhead (rysowane
-  odrobinę jaśniej). Ostatniego nagrania nie da się usunąć.
+  odrobinę jaśniej). Suwaki i zbliżenia za nim jadą z obrazem, Ctrl+Z cofa. Ostatniego
+  nagrania nie da się usunąć.
 - to samo działa dla MP3 z MP3.
+
+### Wycięcie (usuwanie kawałka nagrania)
+
+- **C** stawia wycięcie w playheadzie: czerwony pas z dwiema krawędziami, na początek tak
+  szeroki, żeby obie dało się złapać. Przejdź dalej (klik, ←/→, Shift+←/→) i wciśnij **C**
+  jeszcze raz: bliższa krawędź dociąga się do playheada (dalej wydłuża, bliżej skraca, przed
+  początkiem przesuwa początek). Krawędzie da się też przeciągać myszą (przyciąganie do styków,
+  suwaków, podkładów i zbliżeń, Ctrl wyłącza); film pokazuje klatkę pod krawędzią.
+- **Delete** / Backspace wycina, **Esc** porzuca. Ctrl+Z cofa wykonane wycięcia (i usunięcia
+  nagrań), dowolnie wiele, aż do ostatniego wstawienia nagrania. Ponawiania nie ma.
+- Jedno wycięcie naraz. Dopóki istnieje, można odtwarzać (odtwarzanie je pomija, więc słychać
+  i widać wynik), przewijać, przybliżać i przesuwać suwaki; ciach, Z, głośność, dropy i inna
+  edycja czekają (komunikat w rogu).
+- Wycięcie zabiera czas tylko ścieżce, na której leży. Na filmie: obraz, suwaki i zbliżenia za
+  nim jadą w lewo, zbliżenie nachodzące na wycięcie jest skracane (pozycje Kadru z wyciętych
+  klatek przepadają), podkłady trzymają się swojej klatki obrazu (z wyciętej: cofają się na
+  szew). Miejsce cięcia jest stykiem: nagranie rozpada się na dwa, oba widać w tytule (`+N`)
+  i między nimi jest gniazdo na kolejny plik.
+- Przy zaznaczonym podkładzie **C** stawia wycięcie na podkładzie (playhead musi w nim stać):
+  wycina kawałek muzyki, reszta dosuwa się; szew widać na pasku podkładu. Film bez zmian.
+- Wycięcie nie zmienia plików na dysku i nie przebudowuje sklejki: wynik składa ffmpeg przy
+  ciachu. Skutek uboczny: w podglądzie na szwie wycięcia odtwarzanie zacina się na ułamek
+  sekundy (wynik jest czysty), a ciach fragmentu, w którym jest szew, koduje dźwięk do AAC
+  192 kbit/s zamiast kopiować go 1:1 (mp3 tnie się bez strat, bo ramka mp3 to klatka).
+  Decyzja i alternatywy: `docs/adr/0002-wyciecie-wirtualne.md`.
 
 ### Podkład (muzyka pod wideo)
 
@@ -46,7 +72,9 @@ Słownik pojęć (Fragment, Suwak, Ciach, Mały Ciach) jest w `CONTEXT.md`.
   do styków, suwaków, playheada, początku i końca filmu oraz innych podkładów; Ctrl podczas
   przeciągania wyłącza przyciąganie.
 - zaznaczony podkład albo jego krawędź: ←/→ przesuwa o klatkę (Shift: 1 s), Home / End
-  dosuwa do początku / końca filmu, Delete usuwa.
+  dosuwa do początku / końca filmu, Delete usuwa. Podkład jest zaczepiony w klatce obrazu:
+  po wstawieniu albo wycięciu nagrania przed nim jedzie razem z tą klatką. Podkład jest zaczepiony w klatce obrazu:
+  po wstawieniu albo wycięciu nagrania przed nim jedzie razem z tą klatką.
 - ↑/↓: głośność (5 %, z Shift 1 %) zaznaczonego podkładu, a bez zaznaczenia głośność filmu.
 - podkład może wystawać za koniec filmu (timeline się wtedy wydłuża); przy ciachu liczy się
   tylko fragment między suwakami. Dźwięk filmu i podkłady miksują się do jednej ścieżki AAC
@@ -73,7 +101,9 @@ Słownik pojęć (Fragment, Suwak, Ciach, Mały Ciach) jest w `CONTEXT.md`.
   zbliżenie tak, jak wyjdzie w pliku. Esc zdejmuje zaznaczenie (cień znika).
 - przy zaznaczonym zbliżeniu ←/→ i Home/End nadal chodzą po klatkach (żeby ustawiać Kadr
   klatka po klatce); samo zbliżenie, jego krawędź albo rampę przesuwa Ctrl+←/→ (Ctrl+Shift: 1 s).
-  Delete usuwa zbliżenie, Delete na zaznaczonej rampie tylko ją zeruje. Usunięcie nagrania usuwa zbliżenia, które w nim leżały.
+  Delete usuwa zbliżenie, Delete na zaznaczonej rampie tylko ją zeruje. Usunięcie nagrania
+  albo wycięcie skraca zbliżenia, które na nie nachodzą (pozycje Kadru z usuniętych klatek
+  przepadają; gdy Kadr akurat przejeżdżał, brzegi zapamiętują to, co pokazywał).
 - w wyniku (ciach i mały ciach) Kadr jest powiększany do rozdzielczości źródła.
 
 Plik źródłowy nigdy nie jest zmieniany. Sklejone nagrania trafiają jako jeden plik tymczasowy do
@@ -107,4 +137,4 @@ exe na GitHubie i podepnie go pod release.
 
 Ustawienie zmiennej `CIACH_DEBUG=1` włącza endpoint `POST /debug/js` na lokalnym porcie
 (wykonuje JS w oknie), a `CIACH_PORTFILE=<ścieżka>` zapisuje numer portu do pliku.
-Służy wyłącznie do automatycznych testów UI (`tests/drive_ui.py`, `tests/drive_seq.py`, `tests/drive_zoom.py`); domyślnie wyłączone.
+Służy wyłącznie do automatycznych testów UI (`tests/drive_ui.py`, `tests/drive_seq.py`, `tests/drive_zoom.py`, `tests/drive_cut.py`); domyślnie wyłączone.

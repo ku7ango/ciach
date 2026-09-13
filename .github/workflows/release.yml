@@ -50,6 +50,10 @@ jobs:
         shell: pwsh
         run: .\venv\Scripts\python tests\test_zblizenie.py
 
+      - name: Test Wycięć (backend, bez okna)
+        shell: pwsh
+        run: .\venv\Scripts\python tests\test_wyciecie.py
+
       - name: Sprawdź, że exe startuje i ma w środku ffmpeg
         shell: pwsh
         run: |

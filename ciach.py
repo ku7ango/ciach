@@ -5,6 +5,7 @@ waveform, znaczniki klatek) + ffmpeg/ffprobe do analizy i eksportu.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -143,6 +144,71 @@ def plan_small_video(dur: float, width: int, height: int, fps: float, vbitrate: 
         "scale": out_h != height, "fps_change": out_fps != fps,
     }
 
+class Fragment:
+    """Zakres Ciachu w czasie pliku: [start, end) bez `holes`, czyli wykonanych Wycięć (ADR 0002).
+    Czas Sekwencji (`seq`) to czas pliku minus dziury przed nim; czas w grafie ffmpeg (`graph`)
+    to czas Sekwencji minus wejściowy -ss (`pre`)."""
+
+    def __init__(self, start: float, end: float, holes=None):
+        self.start = float(start)
+        self.end = float(end)
+        hs: list[tuple[float, float]] = []
+        for h in holes or []:
+            try:
+                a, b = max(self.start, float(h[0])), min(self.end, float(h[1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+            if b - a > 1e-6:
+                hs.append((a, b))
+        hs.sort()
+        merged: list[tuple[float, float]] = []
+        for a, b in hs:
+            if merged and a <= merged[-1][1] + 1e-6:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
+        self.holes = merged
+        self.pre = max(0.0, self.start - 3.0)
+
+    @property
+    def dur(self) -> float:
+        return self.end - self.start - sum(b - a for a, b in self.holes)
+
+    def segments(self) -> list[tuple[float, float]]:
+        """Zachowane odcinki [a, b) pliku wewnątrz Fragmentu, po kolei."""
+        out: list[tuple[float, float]] = []
+        t = self.start
+        for a, b in self.holes:
+            if a - t > 1e-6:
+                out.append((t, a))
+            t = b
+        if self.end - t > 1e-6:
+            out.append((t, self.end))
+        return out
+
+    def seq(self, t: float) -> float:
+        s = t
+        for a, b in self.holes:
+            if t >= b:
+                s -= b - a
+            elif t > a:
+                s -= t - a
+        return s
+
+    def graph(self, t: float) -> float:
+        return self.seq(t) - self.pre
+
+    def cut_filters(self) -> list[str]:
+        """Obraz: `select` zostawia tylko klatki z zachowanych odcinków (ten sam zapas 0,5 ms co
+        cięcie: klatka o znaczniku `a` wchodzi, `b` nie), `setpts` dosuwa klatki za każdą dziurą
+        o jej długość, żeby znaczniki były ciągłe (inaczej vfr zostawiłby zamrożony obraz)."""
+        if not self.holes:
+            return []
+        eps = 0.0005
+        sel = "+".join(f"between(t,{a - self.pre - eps:.6f},{b - self.pre - eps:.6f})" for a, b in self.segments())
+        shift = "+".join(f"gte(T,{b - self.pre - eps:.6f})*{b - a:.6f}" for a, b in self.holes)
+        return [f"select='{sel}'", f"setpts='PTS-({shift})/TB'"]
+
 
 class Media:
     """Stan jednego wczytanego pliku. `gen` odróżnia kolejne pliki."""
@@ -174,10 +240,14 @@ class Media:
         self.wave: bytes | None = None
         self.procs: list[subprocess.Popen] = []
         self.dead = False
-        # Sekwencja: lista Nagrań, z których plik został sklejony (jedno = zwykłe Nagranie).
-        # Każda część: {"path", "name", "duration", "start"}. `display_name` to nazwa
-        # pierwszego Nagrania (tytuł okna, nazwa wyniku), niezależna od pliku tymczasowego.
-        self.parts: list[dict] = [{"path": path, "name": self.name, "duration": 0.0, "start": 0.0}]
+        # Sekwencja (ADR 0002): `copies` to pliki źródłowe sklejone w tym pliku, po kolei
+        # ({"path", "name", "duration", "start"}; `start` = gdzie kopia zaczyna się w tym pliku),
+        # a `parts` to Nagrania: ciągłe kawałki kopii ({"src": indeks kopii, "in", "out"} w sekundach
+        # pliku źródłowego). Wycięcie dzieli kawałek na dwa; to, czego nie ma w `parts`, jest dziurą,
+        # której timeline, odtwarzanie i Ciach nie pokazują. Zwykłe Nagranie = jedna kopia, jeden
+        # kawałek. `display_name` to nazwa pierwszego Nagrania (tytuł okna, nazwa wyniku).
+        self.copies: list[dict] = [{"path": path, "name": self.name, "duration": 0.0, "start": 0.0}]
+        self.parts: list[dict] = [{"src": 0, "in": 0.0, "out": 0.0}]
         self.display_name = self.name
 
     def probe(self):
@@ -232,7 +302,8 @@ class Media:
             raise MediaError("Plik nie zawiera obrazu ani dźwięku.")
         if self.duration <= 0:
             raise MediaError("Nie udało się odczytać długości pliku.")
-        self.parts[0]["duration"] = self.duration
+        self.copies[0]["duration"] = self.duration
+        self.parts[0]["out"] = self.duration
 
     def signature(self) -> tuple:
         """Parametry, które muszą się zgadzać, żeby Nagrania dało się skleić bez przekodowania.
@@ -265,8 +336,15 @@ class Media:
             "vcodec": self.vcodec,
             "audioStreams": self.audio_streams,
             "waveBinSec": WAVE_BIN / WAVE_RATE,
-            "parts": [{"name": p["name"], "duration": p["duration"], "start": p["start"]} for p in self.parts],
+            "parts": [{"name": self.copies[p["src"]]["name"], "duration": self.copies[p["src"]]["duration"],
+                       "start": self.copies[p["src"]]["start"], "src": p["src"], "in": p["in"], "out": p["out"]}
+                      for p in self.parts],
         }
+
+    def piece_range(self, p: dict) -> tuple[float, float]:
+        """Zakres kawałka w czasie tego pliku: [początek, koniec)."""
+        c = self.copies[p["src"]]
+        return c["start"] + p["in"], c["start"] + p["out"]
 
     def kill(self):
         self.dead = True
@@ -394,8 +472,10 @@ class App:
             threading.Thread(target=self._remove, args=(m.path,), daemon=True).start()
 
     def join(self, paths: list[str], index: int):
-        """Wstawia Nagrania `paths` do Sekwencji na pozycję `index` (0 = na początek,
-        len(parts) = na koniec) i skleja całość bez przekodowania do pliku tymczasowego."""
+        """Wstawia Nagrania `paths` do Sekwencji przed kawałek `index` (0 = na początek,
+        len(parts) = na koniec) i skleja całość bez przekodowania do pliku tymczasowego.
+        Kawałki zostają kawałkami: sąsiednie kawałki tej samej kopii idą do pliku jako jedna
+        kopia, a wstawienie między dwa kawałki jednej kopii dubluje ją (ADR 0002)."""
         base = self.media
         if not base:
             self.load(paths[0])
@@ -411,41 +491,86 @@ class App:
                 if m.signature() != base.signature():
                     raise MediaError(f"{m.name}: inne parametry ({m.describe()}) niż Sekwencja ({base.describe()}).")
                 new.append(m)
-            index = max(0, min(int(index), len(base.parts)))
-            parts = list(base.parts)
-            parts[index:index] = [{"path": m.path, "name": m.name, "duration": m.duration, "start": 0.0}
-                                  for m in new]
-            self.build_sequence(base, parts, reason="join", inserted=(index, sum(m.duration for m in new)))
+            with self.lock:
+                pieces = [dict(p) for p in base.parts]
+                old_copies = base.copies
+            index = max(0, min(int(index), len(pieces)))
+            entries: list[dict] = []  # {"copy", "src", "pieces"}
+
+            def add_new():
+                for m in new:
+                    entries.append({"copy": {"path": m.path, "name": m.name, "duration": m.duration, "start": 0.0},
+                                    "src": None, "pieces": [{"in": 0.0, "out": m.duration, "old": None}]})
+
+            for i, pc in enumerate(pieces):
+                if i == index:
+                    add_new()
+                piece = {"in": pc["in"], "out": pc["out"], "old": i}
+                if entries and entries[-1]["src"] is not None and entries[-1]["src"] == pc["src"]:
+                    entries[-1]["pieces"].append(piece)
+                else:
+                    entries.append({"copy": dict(old_copies[pc["src"]]), "src": pc["src"], "pieces": [piece]})
+            if index == len(pieces):
+                add_new()
+            copies: list[dict] = []
+            parts: list[dict] = []
+            remap: list[list[float]] = []
+            t = 0.0
+            for e_i, e in enumerate(entries):
+                c = e["copy"]
+                c["start"] = t
+                copies.append(c)
+                for piece in e["pieces"]:
+                    parts.append({"src": e_i, "in": piece["in"], "out": piece["out"]})
+                    if piece["old"] is not None:
+                        old_start = old_copies[pieces[piece["old"]]["src"]]["start"]
+                        remap.append([old_start + piece["in"], old_start + piece["out"], t - old_start])
+                t += c["duration"]
+            self.build_sequence(base, copies, parts, reason="join",
+                                inserted=(index, sum(m.duration for m in new)), remap=remap)
         except MediaError as e:
             self.emit("join", state="error", message=str(e))
         finally:
             self.joining = False
 
-    def remove_part(self, index: int):
-        base = self.media
-        if not base or len(base.parts) < 2 or not (0 <= index < len(base.parts)):
-            return
-        if self.joining or self.export_active:
-            self.emit("reject", message="Poczekaj na zakończenie bieżącej operacji.")
-            return
-        self.joining = True
-        try:
-            parts = list(base.parts)
-            removed = parts.pop(index)
-            self.build_sequence(base, parts, reason="remove", removed=(removed["start"], removed["duration"]))
-        except MediaError as e:
-            self.emit("join", state="error", message=str(e))
-        finally:
-            self.joining = False
+    def set_parts(self, parts) -> dict:
+        """Nowy skład Nagrań z UI (po Wycięciu, usunięciu Nagrania albo Cofnięciu): lista
+        {"src", "in", "out"} po kolei. Plik tymczasowy zostaje, zmienia się tylko lista kawałków."""
+        with self.lock:
+            m = self.media
+            if not m or not isinstance(parts, list):
+                return {"ok": False, "message": "Brak Sekwencji."}
+            clean: list[dict] = []
+            prev_end = -1.0
+            for p in parts:
+                try:
+                    src = int(p["src"])
+                    a, b = float(p["in"]), float(p["out"])
+                except (KeyError, TypeError, ValueError):
+                    return {"ok": False, "message": "Zły opis Nagrania."}
+                if not (0 <= src < len(m.copies)):
+                    return {"ok": False, "message": "Zły opis Nagrania."}
+                c = m.copies[src]
+                a = max(0.0, min(a, c["duration"]))
+                b = max(a, min(b, c["duration"]))
+                if b - a <= 0 or c["start"] + a < prev_end - 1e-6:
+                    return {"ok": False, "message": "Nagrania nachodzą na siebie."}
+                prev_end = c["start"] + b
+                clean.append({"src": src, "in": a, "out": b})
+            if not clean:
+                return {"ok": False, "message": "Sekwencja nie może być pusta."}
+            m.parts = clean
+        self.set_title(self.title_for(m))
+        return {"ok": True}
 
-    def build_sequence(self, base: Media, parts: list[dict], reason: str, **extra):
+    def build_sequence(self, base: Media, copies: list[dict], parts: list[dict], reason: str, **extra):
         t = 0.0
-        for p in parts:
-            p["start"] = t
-            t += p["duration"]
+        for c in copies:
+            c["start"] = t
+            t += c["duration"]
         total = t
-        if len(parts) == 1:
-            media = self.probe_new(parts[0]["path"])
+        if len(copies) == 1:
+            media = self.probe_new(copies[0]["path"])
         else:
             with self.lock:
                 self.gen += 1
@@ -453,8 +578,8 @@ class App:
             out = os.path.join(self.temp_dir(), f"seq_{gen}{base.ext}")
             lst = os.path.join(self.temp_dir(), f"seq_{gen}.txt")
             with open(lst, "w", encoding="utf-8") as f:
-                for p in parts:
-                    f.write("file '" + p["path"].replace("'", r"'\''") + "'\n")
+                for c in copies:
+                    f.write("file '" + c["path"].replace("'", r"'\''") + "'\n")
             cmd = [FFMPEG, "-y", "-hide_banner", "-v", "error", "-nostats", "-progress", "pipe:1",
                    "-f", "concat", "-safe", "0", "-i", lst, "-map", "0", "-c", "copy"]
             if base.ext == ".mp4":
@@ -477,8 +602,9 @@ class App:
             except Exception as e:  # noqa: BLE001
                 self._remove(out)
                 raise MediaError(f"Sklejony plik jest uszkodzony: {e}") from e
+        media.copies = copies
         media.parts = parts
-        media.display_name = parts[0]["name"]
+        media.display_name = copies[0]["name"]
         media.sig = base.signature()
         self.emit("join", state="done", reason=reason, **extra)
         self.install_media(media, reason=reason)
@@ -620,9 +746,11 @@ class App:
         self.encoder_ready.set()
 
     # ---------- eksport ----------
-    def start_export(self, start: float, end: float, mode: str = "full", mix: dict | None = None) -> dict:
-        """`mix`: {"gain": Głośność Sekwencji 0..1, "podklady": [{"gen", "at", "tin", "tout", "gain"}]}.
-        `at` = czas Sekwencji, w którym zaczyna się Podkład; `tin`/`tout` = zakres w pliku mp3."""
+    def start_export(self, start: float, end: float, mode: str = "full", mix: dict | None = None,
+                     holes=None) -> dict:
+        """`mix`: {"gain": Głośność Sekwencji 0..1, "podklady": [{"gen", "at", "segs" | "tin"/"tout", "gain"}],
+        "zblizenia": [...]}. `at` = czas pliku, w którym zaczyna się Podkład; `segs` = odcinki mp3 grane
+        po kolei. `holes`: [[a, b], ...] wykonane Wycięcia w czasie pliku wewnątrz [start, end)."""
         with self.lock:
             if self.export_active:
                 return {"ok": False, "message": "Eksport już trwa."}
@@ -631,13 +759,17 @@ class App:
             m = self.media
             if not m:
                 return {"ok": False, "message": "Brak pliku."}
-            if end <= start:
+            fr = Fragment(start, end, holes)
+            if fr.dur <= 0:
                 return {"ok": False, "message": "Pusty zakres."}
-            zooms = self.resolve_zoom(m, (mix or {}).get("zblizenia"))
+            zooms = self.resolve_zoom(m, (mix or {}).get("zblizenia"), fr)
             mix = self.resolve_mix(m, mix or {})
+            if fr.holes and mix is None and m.kind == "video":
+                # dziury w dźwięku da się wyciąć tylko filtrem, więc idzie przez tor miksu (jedna ścieżka AAC)
+                mix = {"gain": 1.0, "podklady": []}
             self.export_active = True
         target = self.run_small_export if mode == "small" else self.run_export
-        threading.Thread(target=target, args=(m, float(start), float(end), mix, zooms), daemon=True).start()
+        threading.Thread(target=target, args=(m, fr, mix, zooms), daemon=True).start()
         return {"ok": True}
 
     @staticmethod
@@ -649,13 +781,15 @@ class App:
         y = max(0.0, min(1.0 - s_, float(k.get("y", 0.0))))
         return {"x": x, "y": y, "s": s_}
 
-    def resolve_zoom(self, m: Media, spec) -> list[dict]:
-        """Zbliżenia z UI: [{at, end, rin, rout, keys: [{t, x, y, s}]}] w sekundach Sekwencji; `keys` to
-        pozycje Kadru zapamiętane na Klatkach. Odrzuca puste i porządkuje po czasie; nachodzące na siebie
-        UI nie wysyła, ale na wszelki wypadek późniejsze z nachodzącej pary jest pomijane."""
+    def resolve_zoom(self, m: Media, spec, fr: "Fragment | None" = None) -> list[dict]:
+        """Zbliżenia z UI: [{at, end, rin, rout, keys: [{t, x, y, s}]}]; `at`, `end`, `t` w sekundach pliku
+        (pts Klatek), Rampy w sekundach Sekwencji; `keys` to pozycje Kadru zapamiętane na Klatkach.
+        Odrzuca puste i porządkuje po czasie; nachodzące na siebie UI nie wysyła, ale na wszelki
+        wypadek późniejsze z nachodzącej pary jest pomijane."""
         out: list[dict] = []
         if m.kind != "video" or not m.width or not isinstance(spec, list):
             return out
+        seq = fr.seq if fr else (lambda t: t)
         for z in spec:
             try:
                 at, end = float(z["at"]), float(z["end"])
@@ -665,8 +799,9 @@ class App:
                 continue
             rin = max(0.0, float(z.get("rin", 0.0) or 0.0))
             rout = max(0.0, float(z.get("rout", 0.0) or 0.0))
-            if rin + rout > end - at:
-                k = (end - at) / (rin + rout)
+            length = seq(end) - seq(at)
+            if rin + rout > length:
+                k = length / (rin + rout) if rin + rout > 0 else 0.0
                 rin, rout = rin * k, rout * k
             keys: dict[float, dict] = {}
             for q in z.get("keys") or []:
@@ -688,8 +823,9 @@ class App:
         return clean
 
     @staticmethod
-    def kadr_keys(z: dict, t: float) -> dict:
-        """Kadr z zapamiętanych pozycji: przed pierwszą i za ostatnią stoi, między dwiema liniowo."""
+    def kadr_keys(z: dict, t: float, seq=None) -> dict:
+        """Kadr z zapamiętanych pozycji: przed pierwszą i za ostatnią stoi, między dwiema liniowo
+        w czasie Sekwencji (`seq`: czas pliku → czas Sekwencji; dziury po Wycięciach nie liczą się)."""
         ks = z["keys"]
         if t <= ks[0]["t"] + 1e-9:
             return ks[0]["k"]
@@ -699,36 +835,53 @@ class App:
         while i + 1 < len(ks) and ks[i + 1]["t"] <= t + 1e-9:
             i += 1
         a, b = ks[i], ks[i + 1]
-        f = (t - a["t"]) / (b["t"] - a["t"])
+        s_ = seq or (lambda x: x)
+        span = s_(b["t"]) - s_(a["t"])
+        f = (s_(t) - s_(a["t"])) / span if span > 1e-9 else 1.0
+        f = max(0.0, min(1.0, f))
         return {q: a["k"][q] + (b["k"][q] - a["k"][q]) * f for q in ("x", "y", "s")}
 
     @staticmethod
-    def ramp_factor(z: dict, t: float) -> float:
-        L, u = z["end"] - z["at"], t - z["at"]
+    def ramp_factor(z: dict, t: float, seq=None) -> float:
+        s_ = seq or (lambda x: x)
+        L, u = s_(z["end"]) - s_(z["at"]), s_(t) - s_(z["at"])
         if z["rin"] > 0 and u < z["rin"]:
             return max(0.0, min(1.0, u / z["rin"]))
         if z["rout"] > 0 and u > L - z["rout"]:
             return max(0.0, min(1.0, (L - u) / z["rout"]))
         return 1.0
 
+    @staticmethod
+    def file_time(fr: "Fragment", s: float) -> float:
+        """Odwrotność Fragment.seq: czas pliku dla czasu Sekwencji (na szwie: za dziurą)."""
+        t = s
+        for a, b in fr.holes:
+            if t >= a - 1e-9:
+                t += b - a
+        return t
+
     @classmethod
-    def zoom_commands(cls, zooms: list[dict], pre: float, width: int, height: int) -> str:
+    def zoom_commands(cls, zooms: list[dict], pre: float, width: int, height: int,
+                      fr: "Fragment | None" = None) -> str:
         """Plik dla filtra sendcmd: odcinki Zbliżeń jako polecenia dla `crop` (patrz
-        agent_docs/export_pipeline.md). Czas w grafie to czas Sekwencji minus `pre` (wejściowy
-        -ss), z tym samym zapasem 0,5 ms co przy cięciu. Odcinek ze stałym Kadrem to jedno
-        polecenie `[enter]`, odcinek z ruchem to `[expr]` liczone dla każdej klatki z TI (0..1
-        w obrębie odcinka). Kadr między pozycjami i współczynnik Rampy są liniowe w TI, więc ich
-        złożenie jest kwadratowe: `c0+c1*TI+c2*TI*TI`. Bez przecinków w wyrażeniach: przecinek
-        rozdziela polecenia."""
+        agent_docs/export_pipeline.md). Czas w grafie to czas pliku minus `pre` (wejściowy
+        -ss; sendcmd stoi przed `select`, więc dziury Wycięć są jeszcze na osi), z tym samym
+        zapasem 0,5 ms co przy cięciu. Odcinek ze stałym Kadrem to jedno polecenie `[enter]`,
+        odcinek z ruchem to `[expr]` liczone dla każdej klatki z TI (0..1 w obrębie odcinka).
+        Kadr między pozycjami i współczynnik Rampy są liniowe w czasie Sekwencji, a w odcinku
+        bez dziury czas Sekwencji jest liniowy w TI, więc ich złożenie jest kwadratowe:
+        `c0+c1*TI+c2*TI*TI`; granice dziur są punktami podziału. Bez przecinków w wyrażeniach:
+        przecinek rozdziela polecenia."""
         full = (float(width), float(height), 0.0, 0.0)
+        seq = fr.seq if fr else None
 
         def px(k):
             return (width * k["s"], height * k["s"], width * k["x"], height * k["y"])
 
         def seen(z, t):
             """(w, h, x, y) widziane w chwili t: Kadr z pozycji rozciągnięty Rampą w stronę całości."""
-            b = px(cls.kadr_keys(z, t))
-            f = cls.ramp_factor(z, t)
+            b = px(cls.kadr_keys(z, t, seq))
+            f = cls.ramp_factor(z, t, seq)
             return tuple(fv + (bv - fv) * f for fv, bv in zip(full, b))
 
         def seg(t0, t1, v0, v1, mid):
@@ -749,8 +902,16 @@ class App:
         lines: list[str] = []
         for i, z in enumerate(zooms):
             at, end = z["at"], z["end"]
-            pts = {at, end, at + z["rin"], end - z["rout"]}
+            pts = {at, end}
             pts |= {q["t"] for q in z["keys"] if at < q["t"] < end}
+            if fr:
+                for a, b in fr.holes:
+                    pts |= {x for x in (a, b) if at < x < end}
+                # końce Ramp w czasie pliku: tyle sekund Sekwencji od Krawędzi, dziury pominięte
+                pts |= {x for x in (cls.file_time(fr, fr.seq(at) + z["rin"]),
+                                    cls.file_time(fr, fr.seq(end) - z["rout"])) if at < x < end}
+            else:
+                pts |= {x for x in (at + z["rin"], end - z["rout"]) if at < x < end}
             pts_s = sorted(pts)
             for t0, t1 in zip(pts_s, pts_s[1:]):
                 part = seg(t0, t1, seen(z, t0), seen(z, t1), seen(z, (t0 + t1) / 2))
@@ -761,10 +922,10 @@ class App:
                 lines.append(seg(end, nxt, full, full, full))
         return "\n".join(lines) + "\n"
 
-    def write_zoom_file(self, tmp: str, zooms: list[dict], m: Media, start: float) -> str:
+    def write_zoom_file(self, tmp: str, zooms: list[dict], m: Media, fr: "Fragment") -> str:
         path = os.path.join(tmp, ZOOM_CMD)
         with open(path, "w", encoding="ascii") as f:
-            f.write(self.zoom_commands(zooms, self.pre_seek(start), m.width, m.height))
+            f.write(self.zoom_commands(zooms, fr.pre, m.width, m.height, fr))
         return path
 
     @staticmethod
@@ -774,7 +935,8 @@ class App:
         return [f"sendcmd=f={ZOOM_CMD}", "crop=w=iw:h=ih:x=0:y=0", f"scale={out_w}:{out_h}"]
 
     def resolve_mix(self, m: Media, mix: dict) -> dict | None:
-        """Zamienia gen Podkładów na ścieżki i odrzuca miks, który nic nie zmienia (kopia 1:1)."""
+        """Zamienia gen Podkładów na ścieżki i odrzuca miks, który nic nie zmienia (kopia 1:1).
+        Podkład ma `segs` (odcinki mp3 grane po kolei, po Wycięciach) albo starsze `tin`/`tout`."""
         gain = float(mix.get("gain", 1.0))
         gain = max(0.0, min(1.0, gain))
         pods = []
@@ -782,44 +944,85 @@ class App:
             pm = self.podklady.get(int(p.get("gen", 0)))
             if not pm:
                 continue
-            tin, tout = float(p.get("tin", 0.0)), float(p.get("tout", pm.duration))
-            tin = max(0.0, min(tin, pm.duration))
-            tout = max(tin, min(tout, pm.duration))
-            if tout - tin <= 0:
+            raw = p.get("segs")
+            if not isinstance(raw, list):
+                raw = [[p.get("tin", 0.0), p.get("tout", pm.duration)]]
+            segs: list[tuple[float, float]] = []
+            for sg in raw:
+                try:
+                    tin, tout = float(sg[0]), float(sg[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                tin = max(0.0, min(tin, pm.duration))
+                tout = max(tin, min(tout, pm.duration))
+                if tout - tin > 0:
+                    segs.append((tin, tout))
+            if not segs:
                 continue
-            pods.append({"path": pm.path, "at": float(p.get("at", 0.0)), "tin": tin, "tout": tout,
+            pods.append({"path": pm.path, "at": float(p.get("at", 0.0)), "segs": segs,
                          "gain": max(0.0, min(1.0, float(p.get("gain", 1.0))))})
         if m.kind != "video" or (abs(gain - 1.0) < 1e-6 and not pods):
             return None
         return {"gain": gain, "podklady": pods}
 
     @staticmethod
-    def mix_filters(m: Media, start: float, end: float, mix: dict, pre: float) -> tuple[list[str], list[str], str]:
+    def mix_filters(m: Media, fr: "Fragment", mix: dict) -> tuple[list[str], list[str], str]:
         """Graf miksu: dźwięk Sekwencji (wejście 0, przesunięte o `pre` przez wejściowy -ss) plus
-        Podkłady jako kolejne wejścia. Zwraca (dodatkowe argumenty wejść, filtry, etykieta wyjścia)."""
+        Podkłady jako kolejne wejścia. Z dziurami dźwięk Sekwencji to odcinki `atrim` sklejone
+        `concat` (próbka po próbce; pierwszy odcinek zaczyna się w `pre`, żeby wyjściowy -ss
+        ciął dźwięk i obraz w tym samym miejscu). Zwraca (argumenty wejść, filtry, etykietę)."""
         inputs: list[str] = []
         filters: list[str] = []
         chains: list[str] = []
+        pre = fr.pre
         n = m.audio_streams
         if n > 0:
             src = "".join(f"[0:a:{i}]" for i in range(n))
             f = f"amix=inputs={n}:normalize=0," if n > 1 else ""
-            filters.append(f"{src}{f}volume={mix['gain']:.4f}[a0]")
+            segs = fr.segments() if fr.holes else []
+            if len(segs) > 1:
+                K = len(segs)
+                filters.append(f"{src}{f}asplit={K}" + "".join(f"[c{k}]" for k in range(K)))
+                for k, (a, b) in enumerate(segs):
+                    t0 = 0.0 if k == 0 else a - pre
+                    filters.append(f"[c{k}]atrim=start={t0:.6f}:end={b - pre:.6f},asetpts=PTS-STARTPTS[d{k}]")
+                filters.append("".join(f"[d{k}]" for k in range(K)) + f"concat=n={K}:v=0:a=1,volume={mix['gain']:.4f}[a0]")
+            else:
+                filters.append(f"{src}{f}volume={mix['gain']:.4f}[a0]")
             chains.append("[a0]")
         idx = 1
+        s_start, s_end = fr.seq(fr.start), fr.seq(fr.end)
         for p in mix["podklady"]:
-            # Czas Sekwencji `at` odpowiada czasowi (at - pre) w grafie, bo wejście 0 zaczyna się w `pre`.
-            at = p["at"] - pre
-            tin, tout = p["tin"], p["tout"]
+            # Czas pliku `at` odpowiada w grafie czasowi Sekwencji minus `pre` (wejście 0 zaczyna
+            # się w `pre`, dziury są już wycięte). Podkład gra ciągle także przez szwy Wycięć.
+            at = fr.graph(p["at"])
+            segs = [list(sg) for sg in p["segs"]]
+            total = sum(b - a for a, b in segs)
             if at < 0:
-                tin += -at
+                skip = -at
+                while segs and skip > 0:
+                    ln = segs[0][1] - segs[0][0]
+                    if ln <= skip:
+                        skip -= ln
+                        segs.pop(0)
+                    else:
+                        segs[0][0] += skip
+                        skip = 0
                 at = 0.0
-            if tin >= tout or p["at"] >= end or p["at"] + (tout - tin) <= start:
+            if not segs or fr.seq(p["at"]) >= s_end or fr.seq(p["at"]) + total <= s_start:
                 continue
             inputs += ["-i", p["path"]]
             delay = int(round(at * 1000))
-            filters.append(f"[{idx}:a:0]atrim=start={tin:.6f}:end={tout:.6f},asetpts=PTS-STARTPTS,"
-                           f"adelay={delay}|{delay},volume={p['gain']:.4f}[a{idx}]")
+            tail = f"adelay={delay}|{delay},volume={p['gain']:.4f}[a{idx}]"
+            if len(segs) == 1:
+                tin, tout = segs[0]
+                filters.append(f"[{idx}:a:0]atrim=start={tin:.6f}:end={tout:.6f},asetpts=PTS-STARTPTS,{tail}")
+            else:
+                K = len(segs)
+                filters.append(f"[{idx}:a:0]asplit={K}" + "".join(f"[p{idx}_{k}]" for k in range(K)))
+                for k, (tin, tout) in enumerate(segs):
+                    filters.append(f"[p{idx}_{k}]atrim=start={tin:.6f}:end={tout:.6f},asetpts=PTS-STARTPTS[q{idx}_{k}]")
+                filters.append("".join(f"[q{idx}_{k}]" for k in range(K)) + f"concat=n={K}:v=0:a=1,{tail}")
             chains.append(f"[a{idx}]")
             idx += 1
         if not chains:
@@ -841,27 +1044,23 @@ class App:
         return cand
 
     @staticmethod
-    def pre_seek(start: float) -> float:
-        return max(0.0, start - 3.0)
-
-    @classmethod
-    def seek_args(cls, m: Media, start: float, end: float, extra_inputs: list[str] | None = None) -> list[str]:
+    def seek_args(m: Media, fr: "Fragment", extra_inputs: list[str] | None = None) -> list[str]:
         # Dwustopniowy seek (patrz agent_docs/export_pipeline.md). Wejścia Podkładów idą po
         # wejściu 0, a wyjściowy -ss/-t tnie wszystkie strumienie wyjściowe, także zmiksowane.
-        dur = end - start
-        pre = cls.pre_seek(start)
-        oss = max(0.0, start - pre - 0.0005)
-        return ["-ss", f"{pre:.6f}", "-i", m.path, *(extra_inputs or []), "-ss", f"{oss:.6f}", "-t", f"{dur:.6f}"]
+        # `-t` to długość bez dziur: za dziurami znaczniki są już dosunięte (setpts / concat).
+        pre = fr.pre
+        oss = max(0.0, fr.start - pre - 0.0005)
+        return ["-ss", f"{pre:.6f}", "-i", m.path, *(extra_inputs or []), "-ss", f"{oss:.6f}", "-t", f"{fr.dur:.6f}"]
 
-    def build_small_cmd(self, m: Media, start: float, end: float, out: str, plan: dict,
+    def build_small_cmd(self, m: Media, fr: "Fragment", out: str, plan: dict,
                         pass_no: int, passlog: str, mix: dict | None = None, zoom: bool = False) -> list[str]:
         extra_inputs: list[str] = []
         mix_filters: list[str] = []
         mix_label = ""
         if mix and pass_no == 2:
-            extra_inputs, mix_filters, mix_label = self.mix_filters(m, start, end, mix, self.pre_seek(start))
+            extra_inputs, mix_filters, mix_label = self.mix_filters(m, fr, mix)
         cmd = [FFMPEG, "-y", "-hide_banner", "-v", "error", "-nostats", "-progress", "pipe:1",
-               *self.seek_args(m, start, end, extra_inputs)]
+               *self.seek_args(m, fr, extra_inputs)]
         filters: list[str] = []
         vf: list[str] = []
         if zoom:
@@ -870,6 +1069,7 @@ class App:
             oh = plan["height"] if plan["scale"] else m.height
             ow = int(round(m.width * oh / m.height / 2)) * 2
             vf += self.zoom_chain(ow, oh)
+        vf += fr.cut_filters()
         if plan["fps_change"]:
             vf.append(f"fps={plan['fps']:g}")
         if plan["scale"] and not zoom:
@@ -914,11 +1114,48 @@ class App:
             cmd += ["-movflags", "+faststart", out]
         return cmd
 
-    def build_small_mp3_cmd(self, m: Media, start: float, end: float, out: str, rate: int) -> list[str]:
+    def build_small_mp3_cmd(self, m: Media, fr: "Fragment", out: str, rate: int) -> list[str]:
         return [FFMPEG, "-y", "-hide_banner", "-v", "error", "-nostats", "-progress", "pipe:1",
-                *self.seek_args(m, start, end), "-map", "0", "-c:v", "copy",
+                *self.seek_args(m, fr), "-map", "0", "-c:v", "copy",
                 "-c:a", "libmp3lame", "-b:a", str(rate), "-map_metadata", "0", "-id3v2_version", "3",
                 "-avoid_negative_ts", "make_zero", out]
+
+    def cut_mp3(self, m: Media, fr: "Fragment", tmp: str) -> tuple[Media, "Fragment"]:
+        """Mp3 z Wycięciami: każdy zachowany odcinek kopiowany osobno (ten sam dwustopniowy seek co
+        Ciach, ramka mp3 = Klatka, bez strat), potem sklejone concat demuxerem w `tmp/cut.mp3`
+        z tagami z oryginału. Zwraca (Media wskazujące na sklejkę, Fragment 0..długość), na których
+        działa zwykły tor mp3. Rzuca MediaError."""
+        segs = fr.segments()
+        names: list[str] = []
+        for k, (a, b) in enumerate(segs):
+            seg = os.path.join(tmp, f"seg{k}.mp3")
+            cmd = [FFMPEG, "-y", "-hide_banner", "-v", "error", "-nostats", "-progress", "pipe:1",
+                   *self.seek_args(m, Fragment(a, b)), "-map", "0:a:0", "-c", "copy", "-write_xing", "0",
+                   "-avoid_negative_ts", "make_zero", seg]
+            rc, err = self.run_ffmpeg_export(cmd, b - a, m, lambda pct: None)
+            if self.export_out is None:
+                raise MediaError("anulowano")
+            if rc != 0 or not os.path.isfile(seg):
+                self.write_error_log(cmd, rc, err)
+                raise MediaError("Wycięcie mp3 nie powiodło się: " + (err.strip().splitlines() or ["ffmpeg"])[-1][:200])
+            names.append(seg)
+        lst = os.path.join(tmp, "cut.txt")
+        with open(lst, "w", encoding="utf-8") as f:
+            for p in names:
+                f.write("file '" + p.replace("'", r"'\''") + "'\n")
+        out = os.path.join(tmp, "cut.mp3")
+        cmd = [FFMPEG, "-y", "-hide_banner", "-v", "error", "-nostats", "-progress", "pipe:1",
+               "-f", "concat", "-safe", "0", "-i", lst, "-i", m.path, "-map", "0", "-map_metadata", "1",
+               "-c", "copy", "-id3v2_version", "3", out]
+        rc, err = self.run_ffmpeg_export(cmd, fr.dur, m, lambda pct: None)
+        if self.export_out is None:
+            raise MediaError("anulowano")
+        if rc != 0 or not os.path.isfile(out):
+            self.write_error_log(cmd, rc, err)
+            raise MediaError("Sklejenie mp3 nie powiodło się: " + (err.strip().splitlines() or ["ffmpeg"])[-1][:200])
+        m2 = copy.copy(m)
+        m2.path = out
+        return m2, Fragment(0.0, fr.dur)
 
     def write_error_log(self, cmd: list[str], rc: int, err: str):
         try:
@@ -929,18 +1166,18 @@ class App:
         except OSError:
             pass
 
-    def run_small_export(self, m: Media, start: float, end: float, mix: dict | None = None,
+    def run_small_export(self, m: Media, fr: "Fragment", mix: dict | None = None,
                          zooms: list[dict] | None = None):
         stem, ext = os.path.splitext(m.display_name)
         out = self.unique_out(stem, ext.lower(), "_ciach_maly")
         tmp = tempfile.mkdtemp(prefix="ciach_")
         self.export_out = out
         self.export_tmp = tmp
-        dur = end - start
+        dur = fr.dur
         state = {"attempt": 1}
         zoom = bool(zooms) and m.kind == "video"
         if zoom:
-            self.write_zoom_file(tmp, zooms, m, start)
+            self.write_zoom_file(tmp, zooms, m, fr)
 
         def progress(pct: float):
             self.emit("export", state="progress", mode="small", percent=round(pct), attempt=state["attempt"])
@@ -959,7 +1196,7 @@ class App:
         try:
             if m.kind == "video":
                 size = 0
-                # Z miksem (Podkłady albo Głośność) audio zawsze idzie przez AAC, więc plan
+                # Z miksem (Podkłady, Głośność albo Wycięcia) audio zawsze idzie przez AAC, więc plan
                 # dostaje co najmniej jedną ścieżkę i nigdy nie wybiera kopii.
                 streams = m.audio_streams if not mix else max(2, m.audio_streams)
                 for attempt, factor in enumerate(SMALL_FACTORS, 1):
@@ -968,7 +1205,7 @@ class App:
                                             streams, factor)
                     passlog = os.path.join(tmp, f"pass{attempt}")
                     for pass_no in (1, 2):
-                        cmd = self.build_small_cmd(m, start, end, out, plan, pass_no, passlog, mix, zoom)
+                        cmd = self.build_small_cmd(m, fr, out, plan, pass_no, passlog, mix, zoom)
                         base = 50.0 * (pass_no - 1)
                         rc, err = self.run_ffmpeg_export(cmd, dur, m, lambda p, b=base: progress(b + p / 2), cwd=tmp)
                         if cancelled():
@@ -983,7 +1220,15 @@ class App:
                         return
                 self.emit("export", state="toobig", mode="small", file=os.path.basename(out), size=size)
             else:
-                cmd = self.build_cmd(m, start, end, out, "x264")
+                if fr.holes:
+                    try:
+                        m, fr = self.cut_mp3(m, fr, tmp)
+                    except MediaError as e:
+                        if cancelled():
+                            return
+                        self.emit("export", state="error", mode="small", message=str(e)[:200])
+                        return
+                cmd = self.build_cmd(m, fr, out, "x264")
                 rc, err = self.run_ffmpeg_export(cmd, dur, m, progress)
                 if cancelled():
                     return
@@ -997,7 +1242,7 @@ class App:
                         break
                     attempt += 1
                     state["attempt"] = attempt
-                    cmd = self.build_small_mp3_cmd(m, start, end, out, rate)
+                    cmd = self.build_small_mp3_cmd(m, fr, out, rate)
                     rc, err = self.run_ffmpeg_export(cmd, dur, m, progress)
                     if cancelled():
                         return
@@ -1021,8 +1266,8 @@ class App:
                 self.export_active = False
                 self.export_out = None
                 self.export_tmp = None
-            if self.media is m:
-                self.set_title(self.title_for(m))
+            if self.media is m or (self.media and self.media.gen == m.gen):
+                self.set_title(self.title_for(self.media))
 
     @staticmethod
     def _remove(path: str):
@@ -1034,28 +1279,30 @@ class App:
             except OSError:
                 time.sleep(0.2)
 
-    def build_cmd(self, m: Media, start: float, end: float, out: str, encoder: str,
+    def build_cmd(self, m: Media, fr: "Fragment", out: str, encoder: str,
                   mix: dict | None = None, zoom: bool = False) -> list[str]:
         # Dwustopniowy seek: wejściowy -ss do ~3 s przed cięciem (szybki skok do
         # klatki kluczowej), wyjściowy -ss dokładnie na cięcie. Dzięki temu
         # kopiowane strumienie (audio) też zaczynają się w miejscu cięcia, a nie
         # na klatce kluczowej sprzed niego. 0,5 ms zapasu gwarantuje, że klatka
         # o znaczniku `start` wejdzie, a klatka o znaczniku `end` już nie.
+        # Wycięcia (dziury): obraz przez select/setpts, dźwięk przez tor miksu (ADR 0002).
         head = [FFMPEG, "-y", "-hide_banner", "-v", "error", "-nostats", "-progress", "pipe:1"]
         if m.kind == "video":
             venc = NVENC_ARGS if encoder == "nvenc" else X264_ARGS
-            vfilters = [f"[0:v:0]{','.join(self.zoom_chain(m.width, m.height))}[v]"] if zoom else []
-            vmap = "[v]" if zoom else "0:v:0"
+            vf = (self.zoom_chain(m.width, m.height) if zoom else []) + fr.cut_filters()
+            vfilters = [f"[0:v:0]{','.join(vf)}[v]"] if vf else []
+            vmap = "[v]" if vf else "0:v:0"
             if mix:
-                # Podkłady albo Głośność: jedna ścieżka AAC z miksu (patrz export_pipeline.md).
-                inputs, filters, label = self.mix_filters(m, start, end, mix, self.pre_seek(start))
-                return head + [*self.seek_args(m, start, end, inputs), "-filter_complex", ";".join(vfilters + filters),
+                # Podkłady, Głośność albo Wycięcia: jedna ścieżka AAC z miksu (patrz export_pipeline.md).
+                inputs, filters, label = self.mix_filters(m, fr, mix)
+                return head + [*self.seek_args(m, fr, inputs), "-filter_complex", ";".join(vfilters + filters),
                                "-map", vmap, "-map", label, *venc, *VIDEO_TB, "-pix_fmt", "yuv420p",
                                "-c:a", "aac", "-b:a", str(MIX_AUDIO_RATE), "-movflags", "+faststart", out]
-            fc = ["-filter_complex", ";".join(vfilters)] if zoom else []
-            return head + [*self.seek_args(m, start, end), *fc, "-map", vmap, "-map", "0:a?", *venc, *VIDEO_TB,
+            fc = ["-filter_complex", ";".join(vfilters)] if vfilters else []
+            return head + [*self.seek_args(m, fr), *fc, "-map", vmap, "-map", "0:a?", *venc, *VIDEO_TB,
                            "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out]
-        return head + [*self.seek_args(m, start, end), "-map", "0", "-c", "copy", "-map_metadata", "0",
+        return head + [*self.seek_args(m, fr), "-map", "0", "-c", "copy", "-map_metadata", "0",
                        "-id3v2_version", "3", "-avoid_negative_ts", "make_zero", out]
 
     def run_ffmpeg_export(self, cmd: list[str], dur: float, m: Media, on_progress=None,
@@ -1098,7 +1345,7 @@ class App:
         setattr(self, attr, None)
         return p.returncode, b"".join(err_chunks).decode("utf-8", "replace")
 
-    def run_export(self, m: Media, start: float, end: float, mix: dict | None = None,
+    def run_export(self, m: Media, fr: "Fragment", mix: dict | None = None,
                    zooms: list[dict] | None = None):
         stem, ext = os.path.splitext(m.display_name)
         out = self.unique_out(stem, ext.lower())
@@ -1110,15 +1357,18 @@ class App:
         zoom = bool(zooms) and m.kind == "video"
         tmp = None
         try:
-            if zoom:
+            if zoom or (m.kind != "video" and fr.holes):
                 tmp = tempfile.mkdtemp(prefix="ciach_")
                 self.export_tmp = tmp
-                self.write_zoom_file(tmp, zooms, m, start)
+            if zoom:
+                self.write_zoom_file(tmp, zooms, m, fr)
+            if m.kind != "video" and fr.holes:
+                m, fr = self.cut_mp3(m, fr, tmp)
             attempts = [encoder] if (m.kind != "video" or encoder == "x264") else ["nvenc", "x264"]
             rc, err, cmd = 1, "", []
             for enc in attempts:
-                cmd = self.build_cmd(m, start, end, out, enc, mix, zoom)
-                rc, err = self.run_ffmpeg_export(cmd, end - start, m, cwd=tmp)
+                cmd = self.build_cmd(m, fr, out, enc, mix, zoom)
+                rc, err = self.run_ffmpeg_export(cmd, fr.dur, m, cwd=tmp)
                 if rc == 0:
                     break
                 if enc == "nvenc":
@@ -1136,6 +1386,10 @@ class App:
                 msg = (err.strip().splitlines() or ["ffmpeg zakończył się błędem"])[-1][:200]
                 self.write_error_log(cmd, rc, err)
                 self.emit("export", state="error", mode="full", message=msg)
+        except MediaError as e:
+            if self.export_out is not None:
+                self._remove(out)
+                self.emit("export", state="error", mode="full", message=str(e)[:200])
         except Exception as e:  # noqa: BLE001
             try:
                 with open(ERROR_LOG, "w", encoding="utf-8") as f:
@@ -1155,8 +1409,8 @@ class App:
                 self.export_active = False
                 self.export_out = None
                 self.export_tmp = None
-            if self.media is m:
-                self.set_title(self.title_for(m))
+            if self.media and self.media.gen == m.gen:
+                self.set_title(self.title_for(self.media))
 
     def cancel_export(self):
         p = self.export_proc
@@ -1242,8 +1496,9 @@ class Api:
         self._app.ui_ready_cb()
         return {"port": self._app.port}
 
-    def export(self, start, end, mode="full", mix=None):
-        return self._app.start_export(float(start), float(end), str(mode), mix if isinstance(mix, dict) else None)
+    def export(self, start, end, mode="full", mix=None, holes=None):
+        return self._app.start_export(float(start), float(end), str(mode), mix if isinstance(mix, dict) else None,
+                                      holes if isinstance(holes, list) else None)
 
     def set_title(self, title):
         self._app.set_title(str(title))
@@ -1258,9 +1513,8 @@ class Api:
         threading.Thread(target=self._app.join, args=(paths, int(index)), daemon=True).start()
         return True
 
-    def remove_part(self, index):
-        threading.Thread(target=self._app.remove_part, args=(int(index),), daemon=True).start()
-        return True
+    def set_parts(self, parts):
+        return self._app.set_parts(parts)
 
     def add_podklad(self, path):
         threading.Thread(target=self._app.add_podklad, args=(str(path),), daemon=True).start()

@@ -34,9 +34,13 @@
     handleSel: '#ff8c1a',
     playhead: '#f2f2f5',
     styk: 'rgba(255,255,255,0.35)',
+    seam: 'rgba(255,255,255,0.22)',
     gniazdo: 'rgba(255,255,255,0.14)',
     gniazdoHot: 'rgba(255,140,26,0.4)',
     gniazdoBorder: 'rgba(255,255,255,0.45)',
+    cutFill: 'rgba(235,64,52,0.30)',
+    cutBorder: '#ff5a4e',
+    cutHot: '#ffd3cf',
     text: 'rgba(235,235,240,0.85)',
     textDim: 'rgba(200,200,210,0.55)',
     tick: 'rgba(255,255,255,0.14)',
@@ -54,16 +58,31 @@
   const HIT = 9;
   const GN_W = 24;     // szerokość Gniazda na Styku
   const SNAP_PX = 8;   // próg Przyciągania (px CSS, więc niezależny od DPI)
+  const CUT_MIN_PX = 40; // domyślna szerokość nowego Wycięcia: oba uchwyty do złapania osobno
   const EPS_MAX = 0.001;
   const VOL_LABEL_MS = 1500;
+  const UNDO_MAX = 100;
+  const CUT_BLOCK = 'Najpierw wytnij (Delete) albo porzuć (Esc)';
 
+  // Dwa czasy (ADR 0002): czas PLIKU (pts Klatek w pliku, którym karmimy <video> i ffmpeg) i czas
+  // SEKWENCJI (to, co widać na timeline: plik bez dziur po Wycięciach). Klatki Sekwencji to
+  // zachowane Klatki pliku, numerowane od 0 (`S.frames[i]` = pts w pliku, `S.seqs[i]` = czas
+  // Sekwencji). Suwaki i Wycięcie to indeksy Klatek; Zbliżenia i zaczep Podkładu (`at`) trzymają
+  // pts pliku, bo te nie zmieniają się przy Wycięciu; długości (Rampy, Podkłady) są w sekundach Sekwencji.
   const S = {
     loaded: false,
     gen: 0,
     kind: 'video',
-    duration: 0,
+    duration: 0,     // długość Sekwencji (bez dziur)
+    fileDuration: 0, // długość pliku
     frameStep: 1 / 30,
-    frames: null,
+    fileFrames: null, // pts wszystkich Klatek pliku ze skanu (null: siatka z fps)
+    scanned: false,
+    frames: null,    // pts Klatek Sekwencji (zachowanych) w pliku
+    seqs: null,      // czas Sekwencji Klatek, N+1 wpisów (ostatni = długość Sekwencji)
+    endPts: 0,       // czas pliku tuż za ostatnią Klatką Sekwencji
+    headAtZero: true, // pierwsza Klatka Sekwencji to pierwsza Klatka pliku (Ciach od 0, z całym dźwiękiem)
+    pieces: [],      // Nagrania jako zakresy indeksów Klatek: {ia, ib} (ib wyłącznie)
     N: 1,
     wave: null,
     waveBin: 0.005,
@@ -88,9 +107,11 @@
     playing: false,
     lastT: 0,
     statusTimer: null,
-    parts: [],       // Nagrania w Sekwencji: {name, start, duration}
+    parts: [],       // Nagrania w Sekwencji: {name, src, start, duration, in, out} (start = kopia w pliku)
     gain: 1,         // Głośność Sekwencji
-    pods: [],        // Podkłady: {gen, name, duration, at, tin, tout, gain, wave, waveGain, waveBin, audio}
+    pods: [],        // Podkłady: {gen, name, duration, at, segs:[{tin, tout}], gain, wave, waveGain, waveBin, audio}
+    cut: null,       // Wycięcie: {pod: gen|null, a, b} — Klatki [a, b) Sekwencji (na Podkładzie: pod nim)
+    undo: [],        // Cofnięcie: migawki sprzed wykonanych Wycięć i usunięć Nagrań
     busy: false,     // sklejanie w toku
     dragOver: null,  // {x, y, mp4, mp3} podczas przeciągania pliku z zewnątrz
     pendingShift: null,
@@ -105,25 +126,135 @@
   const extOf = (p) => (String(p).match(/\.[^.\\/]+$/) || [''])[0].toLowerCase();
   const seqExt = () => (S.kind === 'video' ? '.mp4' : '.mp3');
 
+  // ---------- Klatki Sekwencji ----------
   function frameTs(i) {
-    if (i >= S.N) return S.duration;
-    if (i <= 0) return 0;
-    return S.frames ? S.frames[i] : i * S.frameStep;
+    if (i >= S.N) return S.endPts;
+    if (i <= 0) return S.frames ? S.frames[0] : 0;
+    return S.frames[i];
   }
 
+  // Ostatnia Klatka o pts <= t (w dziurze: Klatka sprzed niej); t za końcem → N.
   function frameIndex(t) {
-    if (t <= 0) return 0;
-    if (t >= S.duration) return S.N;
-    if (S.frames) {
-      let lo = 0, hi = S.frames.length - 1;
-      if (t >= S.frames[hi]) return hi;
-      while (lo < hi) {
-        const mid = (lo + hi + 1) >> 1;
-        if (S.frames[mid] <= t + 1e-6) lo = mid; else hi = mid - 1;
-      }
-      return lo;
+    const F = S.frames;
+    if (!F || t <= F[0]) return 0;
+    if (t >= S.endPts) return S.N;
+    let lo = 0, hi = S.N - 1;
+    if (t >= F[hi]) return hi;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (F[mid] <= t + 1e-6) lo = mid; else hi = mid - 1;
     }
-    return clamp(Math.floor(t / S.frameStep + 1e-6), 0, S.N - 1);
+    return lo;
+  }
+
+  // Czas pliku tuż za Klatką i: następna Klatka pliku (początek dziury, gdy za i jest Wycięcie).
+  function frameEnd(i) { return S.frames[i] + (S.seqs[i + 1] - S.seqs[i]); }
+
+  // Najbliższa Klatka dla wartości, która już leżała na Klatce (po remapie sklejania albo skanie
+  // Klatek siatka z fps i prawdziwe pts różnią się o ułamek Klatki; „ostatnia ≤ t” myliłaby się o jedną).
+  function nearestIdx(t) {
+    const i = clamp(frameIndex(t), 0, S.N - 1);
+    return i + 1 < S.N && Math.abs(S.frames[i + 1] - t) < Math.abs(S.frames[i] - t) ? i + 1 : i;
+  }
+  function nearestEndIdx(t) {
+    const i = frameIndex(t);
+    if (i >= S.N) return S.N;
+    const nxt = i + 1 < S.N ? S.frames[i + 1] : S.endPts;
+    return Math.abs(nxt - t) < Math.abs(S.frames[i] - t) ? i + 1 : i;
+  }
+
+  // Czas pliku → czas Sekwencji (w dziurze: szew).
+  function seqOf(t) {
+    if (!S.frames) return t;
+    const i = frameIndex(t);
+    if (i >= S.N) return S.duration;
+    return S.seqs[i] + clamp(t - S.frames[i], 0, S.seqs[i + 1] - S.seqs[i]);
+  }
+
+  // Ostatnia Klatka o czasie Sekwencji <= s; s za końcem → N.
+  function ordAtS(s) {
+    const Q = S.seqs;
+    if (!Q || s <= 0) return 0;
+    if (s >= S.duration) return S.N;
+    let lo = 0, hi = S.N - 1;
+    if (s >= Q[hi]) return hi;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (Q[mid] <= s + 1e-6) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+  }
+
+  // Czas Sekwencji → czas pliku (na szwie: pierwsza Klatka za dziurą).
+  function fileOf(s) {
+    if (!S.frames) return s;
+    const i = ordAtS(s);
+    if (i >= S.N) return S.endPts;
+    return S.frames[i] + (s - S.seqs[i]);
+  }
+
+  // Najbliższa granica Klatki (dla prawych Krawędzi, wyłącznych).
+  function endIndexAtS(s) {
+    if (s >= S.duration) return S.N;
+    const i = ordAtS(Math.max(0, s));
+    return s - S.seqs[i] > (S.seqs[i + 1] - S.seqs[i]) / 2 ? i + 1 : i;
+  }
+
+  // Klatki Sekwencji z Nagrań (`S.parts`) i Klatek pliku (skan albo siatka z fps).
+  function rebuildKept() {
+    let F = S.fileFrames;
+    if (!F) {
+      const n = Math.max(1, Math.ceil(S.fileDuration / S.frameStep - 1e-6));
+      F = new Float64Array(n);
+      for (let k = 0; k < n; k++) F[k] = k * S.frameStep;
+    }
+    const nF = F.length;
+    const atOrAfter = (t) => {
+      let lo = 0, hi = nF;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (F[mid] < t - 1e-4) lo = mid + 1; else hi = mid; }
+      return lo;
+    };
+    const kept = [], dur = [], pieces = [];
+    for (const p of S.parts) {
+      const fa = atOrAfter(p.start + p.in), fb = Math.min(nF, atOrAfter(p.start + p.out));
+      if (fb <= fa) continue;
+      pieces.push({ ia: kept.length, ib: kept.length + (fb - fa), fa, fb });
+      for (let k = fa; k < fb; k++) { kept.push(F[k]); dur.push((k + 1 < nF ? F[k + 1] : S.fileDuration) - F[k]); }
+    }
+    if (!kept.length) {
+      pieces.length = 0;
+      pieces.push({ ia: 0, ib: nF, fa: 0, fb: nF });
+      for (let k = 0; k < nF; k++) { kept.push(F[k]); dur.push((k + 1 < nF ? F[k + 1] : S.fileDuration) - F[k]); }
+    }
+    // Pierwsza Klatka pliku ma pts ~0,02 (opóźnienie kodera AAC w sklejce): zostaje takie, jakie jest,
+    // żeby pozycje na Klatkach przeżywały remap po sklejeniu; Ciach od początku zaczyna mimo to od 0.
+    S.headAtZero = pieces[0].fa === 0;
+    const N = kept.length;
+    S.frames = Float64Array.from(kept);
+    const seqs = new Float64Array(N + 1);
+    for (let i = 0; i < N; i++) seqs[i + 1] = seqs[i] + Math.max(0, dur[i]);
+    S.seqs = seqs;
+    S.N = N;
+    S.duration = seqs[N];
+    const last = pieces[pieces.length - 1];
+    S.endPts = last.fb < nF ? F[last.fb] : S.fileDuration;
+    S.pieces = pieces.map((p) => ({ ia: p.ia, ib: p.ib }));
+  }
+
+  // Dziury (wykonane Wycięcia) w czasie pliku wewnątrz Klatek [a, b): to dostaje ffmpeg.
+  function holesIn(a, b) {
+    const out = [];
+    for (let i = a; i < b; i++) {
+      const next = i + 1 < S.N ? S.frames[i + 1] : S.endPts;
+      const e = frameEnd(i);
+      if (next - e > 1e-6) out.push([e, next]);
+    }
+    return out;
+  }
+
+  function pieceIndexAt(i) {
+    for (let k = 0; k < S.pieces.length; k++) if (i < S.pieces[k].ib) return k;
+    return S.pieces.length - 1;
   }
 
   function pad(n, w) { return String(n).padStart(w, '0'); }
@@ -138,17 +269,63 @@
     if (withMs) out += '.' + pad(ms, 3);
     return out;
   }
+  function fmtKl(n) {
+    const d = n % 10, h = n % 100;
+    return `${n} ${n === 1 ? 'Klatka' : d >= 2 && d <= 4 && (h < 12 || h > 14) ? 'Klatki' : 'Klatek'}`;
+  }
 
-  function podLen(p) { return p.tout - p.tin; }
-  function podEnd(p) { return p.at + podLen(p); }
+  // ---------- Podkłady: odcinki ----------
+  // Podkład gra `segs` (odcinki mp3) po kolei, zaczynając w Klatce `at`; Wycięcie na Podkładzie usuwa
+  // kawałek odcinka, a reszta muzyki dosuwa się. Czasy Podkładu na timeline to sekundy Sekwencji.
+  function podLen(p) { let L = 0; for (const s of p.segs) L += s.tout - s.tin; return L; }
+  function podStart(p) { return seqOf(p.at); }
+  function podEnd(p) { return podStart(p) + podLen(p); }
   function podByGen(gen) { return S.pods.find((p) => p.gen === gen) || null; }
   function selPod() { return S.sel && typeof S.sel === 'object' && S.sel.pod != null ? podByGen(S.sel.pod) : null; }
+  // Czas w mp3 dla odległości `u` od początku Podkładu (null poza nim).
+  function podContent(p, u) {
+    if (u < 0) return null;
+    for (const s of p.segs) {
+      const L = s.tout - s.tin;
+      if (u < L) return s.tin + u;
+      u -= L;
+    }
+    return null;
+  }
+  // Niewykonane Wycięcie na Podkładzie jako odległości od jego początku [ua, ub).
+  function cutPodRange(p) {
+    const c = S.cut;
+    if (!c || c.pod !== p.gen) return null;
+    const s0 = podStart(p), L = podLen(p);
+    return [clamp(S.seqs[c.a] - s0, 0, L), clamp(S.seqs[c.b] - s0, 0, L)];
+  }
+  // Odcinki bez [ua, ub) (odległości od początku Podkładu); sąsiednie ciągłe w mp3 łączą się z powrotem.
+  function cutSegs(segs, ua, ub) {
+    const out = [];
+    let off = 0;
+    for (const s of segs) {
+      const L = s.tout - s.tin;
+      const a = Math.max(ua, off), b = Math.min(ub, off + L);
+      if (b <= a + 1e-9) out.push({ tin: s.tin, tout: s.tout });
+      else {
+        if (a > off + 1e-9) out.push({ tin: s.tin, tout: s.tin + (a - off) });
+        if (b < off + L - 1e-9) out.push({ tin: s.tin + (b - off), tout: s.tout });
+      }
+      off += L;
+    }
+    const merged = [];
+    for (const s of out) {
+      if (merged.length && Math.abs(merged[merged.length - 1].tout - s.tin) < 1e-6) merged[merged.length - 1].tout = s.tout;
+      else merged.push(s);
+    }
+    return merged;
+  }
 
   // ---------- Zbliżenia: Kadry ----------
   const FULL = { x: 0, y: 0, s: 1 };
   function zoomById(id) { return S.zooms.find((z) => z.id === id) || null; }
   function selZoom() { return S.sel && typeof S.sel === 'object' && S.sel.zoom != null ? zoomById(S.sel.zoom) : null; }
-  function zoomLen(z) { return z.end - z.at; }
+  function zoomLen(z) { return seqOf(z.end) - seqOf(z.at); }
   function zoomAt(t) { return S.zooms.find((z) => t >= z.at - 1e-6 && t < z.end - 1e-6) || null; }
   function sameKadr(a, b) { return Math.abs(a.x - b.x) < 1e-4 && Math.abs(a.y - b.y) < 1e-4 && Math.abs(a.s - b.s) < 1e-4; }
   function lerpKadr(a, b, f) { return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, s: a.s + (b.s - a.s) * f }; }
@@ -159,7 +336,7 @@
     return k;
   }
   // Zapamiętane pozycje Kadru `z.keys` (po czasie). Przed pierwszą i za ostatnią Kadr stoi,
-  // między dwiema przejeżdża liniowo. Użytkownik nie widzi „pozycji”, widzi Kadr na każdej Klatce.
+  // między dwiema przejeżdża liniowo w czasie Sekwencji. Użytkownik nie widzi „pozycji”, widzi Kadr na każdej Klatce.
   function keyIndex(z, t) {
     let i = 0;
     while (i + 1 < z.keys.length && z.keys[i + 1].t <= t + 1e-6) i++;
@@ -173,7 +350,8 @@
     const i = keyIndex(z, t);
     const a = ks[i], b = ks[i + 1];
     if (Math.abs(a.t - t) < 1e-6) return { ...a.k };
-    return lerpKadr(a.k, b.k, (t - a.t) / (b.t - a.t));
+    const span = seqOf(b.t) - seqOf(a.t);
+    return lerpKadr(a.k, b.k, span > 1e-9 ? clamp((seqOf(t) - seqOf(a.t)) / span, 0, 1) : 1);
   }
   // Czy w chwili t Kadr stoi (pozycja ustawiona albo trzymana), czy przejeżdża.
   function kadrHolds(z, t) {
@@ -183,14 +361,14 @@
     return Math.abs(ks[i].t - t) < 1e-6 || sameKadr(ks[i].k, ks[i + 1].k);
   }
   function rampFactor(z, t) {
-    const L = zoomLen(z), u = t - z.at;
+    const L = zoomLen(z), u = seqOf(t) - seqOf(z.at);
     if (z.rin > 0 && u < z.rin) return clamp(u / z.rin, 0, 1);
     if (z.rout > 0 && u > L - z.rout) return clamp((L - u) / z.rout, 0, 1);
     return 1;
   }
   // Kadr widziany w chwili t (null = cały obraz): pozycja z Klatki, w Rampie rozciągnięta w stronę całości.
   function kadrAt(z, t) {
-    const u = t - z.at;
+    const u = seqOf(t) - seqOf(z.at);
     if (u < -1e-6 || u >= zoomLen(z) - 1e-6) return null;
     const f = rampFactor(z, t);
     const k = kadrKeys(z, t);
@@ -225,7 +403,7 @@
     return out;
   }
 
-  // Zakres timeline'u: Sekwencja albo najdalej wystający Podkład (Q4 rundy 2).
+  // Zakres timeline'u (czas Sekwencji): Sekwencja albo najdalej wystający Podkład.
   function extent() {
     let e = S.duration;
     for (const p of S.pods) e = Math.max(e, podEnd(p));
@@ -243,8 +421,11 @@
   }
 
   function cssWidth() { return canvas.clientWidth || 1; }
-  function xOf(t) { const v = S.view; return (t - v.start) / (v.end - v.start) * cssWidth(); }
-  function tOf(x) { const v = S.view; return v.start + x / cssWidth() * (v.end - v.start); }
+  // Piksel ↔ czas Sekwencji (xS/sOf); xOf/tOf przyjmują i zwracają czas pliku.
+  function xS(s) { const v = S.view; return (s - v.start) / (v.end - v.start) * cssWidth(); }
+  function sOf(x) { const v = S.view; return v.start + x / cssWidth() * (v.end - v.start); }
+  function xOf(t) { return xS(seqOf(t)); }
+  function tOf(x) { return fileOf(clamp(sOf(x), 0, S.duration)); }
 
   // Układ pionowy: wiersz Sekwencji, (wiersz Zbliżeń), wiersze Podkładów, (pasek Gniazda), linijka.
   function zoomRowWanted() { return S.kind === 'video' && S.zooms.length > 0; }
@@ -267,13 +448,13 @@
 
   function seek(t) {
     if (!S.loaded) return;
-    const max = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : S.duration;
+    const max = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : S.fileDuration;
     try { video.currentTime = clamp(t, 0, max); } catch (e) { /* not ready */ }
     syncPods(true);
   }
 
   function seekFrame(i) {
-    if (i >= S.N) seek(S.duration);
+    if (i >= S.N) seek(frameTs(S.N - 1) + eps());
     else seek(frameTs(i) + eps());
   }
 
@@ -308,13 +489,13 @@
     if (doSeek) seekFrame(handleIndex(kind));
   }
 
-  function ensureVisible(t) {
+  function ensureVisible(s) {
     const v = S.view;
     const span = v.end - v.start;
     const ext = extent();
     if (span >= ext - 1e-9) return;
-    if (t < v.start || t > v.end) {
-      const start = clamp(t - span / 2, 0, ext - span);
+    if (s < v.start || s > v.end) {
+      const start = clamp(s - span / 2, 0, ext - span);
       v.start = start; v.end = start + span;
       invalidateWave();
     }
@@ -325,27 +506,30 @@
     return frameTs(clamp(frameIndex(t), 0, S.N - 1));
   }
 
-  function snapTargets(except, extra) {
-    const ts = [0, S.duration, frameTs(S.left), frameTs(S.right), curTime()];
-    for (const p of S.parts) ts.push(p.start);
+  // Cele Przyciągania w czasie Sekwencji. `noPlayhead`: przy przeciąganiu Krawędzi Wycięcia
+  // Playhead jedzie za Krawędzią, więc nie może być jej celem.
+  function snapTargets(except, extra, noPlayhead) {
+    const ts = [0, S.duration, S.seqs[S.left], S.seqs[S.right]];
+    if (!noPlayhead) ts.push(seqOf(curTime()));
+    for (let k = 1; k < S.pieces.length; k++) ts.push(S.seqs[S.pieces[k].ia]);
     for (const p of S.pods) {
       if (p === except) continue;
-      ts.push(p.at, podEnd(p));
+      ts.push(podStart(p), podEnd(p));
     }
     for (const z of S.zooms) {
       if (z === except) continue;
-      ts.push(z.at, z.end);
+      ts.push(seqOf(z.at), seqOf(z.end));
     }
     if (extra) ts.push(...extra);
     return ts;
   }
 
-  // Zwraca cel, do którego czas `t` ma się przyciągnąć, albo null.
-  function snap(t, targets) {
+  // Zwraca cel, do którego czas Sekwencji `s` ma się przyciągnąć, albo null.
+  function snap(s, targets) {
     let best = null, bestD = SNAP_PX + 1e-9;
-    const x = xOf(t);
+    const x = xS(s);
     for (const c of targets) {
-      const d = Math.abs(xOf(c) - x);
+      const d = Math.abs(xS(c) - x);
       if (d < bestD) { bestD = d; best = c; }
     }
     return best;
@@ -353,70 +537,80 @@
 
   function clampPod(p) {
     const minLen = S.frameStep;
-    p.tin = clamp(p.tin, 0, Math.max(0, p.duration - minLen));
-    p.tout = clamp(p.tout, p.tin + minLen, p.duration);
-    p.at = clamp(p.at, 0, frameTs(S.N - 1));
+    for (const s of p.segs) {
+      s.tin = clamp(s.tin, 0, p.duration);
+      s.tout = clamp(s.tout, s.tin, p.duration);
+    }
+    p.segs = p.segs.filter((s) => s.tout - s.tin > 1e-9);
+    if (!p.segs.length) p.segs = [{ tin: 0, tout: Math.min(p.duration, minLen) }];
+    const last = p.segs[p.segs.length - 1];
+    if (podLen(p) < minLen) last.tout = clamp(last.tin + minLen, last.tin, p.duration);
+    p.at = frameTs(nearestIdx(p.at));
   }
 
-  function movePodTo(p, at, doSnap) {
-    at = quantAt(at);
+  function movePodTo(p, s, doSnap) {
+    let i = clamp(ordAtS(s), 0, S.N - 1);
     if (doSnap) {
       const len = podLen(p);
       const targets = snapTargets(p);
-      const sL = snap(at, targets);
-      const sR = snap(at + len, targets);
-      const dL = sL == null ? Infinity : Math.abs(xOf(sL) - xOf(at));
-      const dR = sR == null ? Infinity : Math.abs(xOf(sR) - xOf(at + len));
-      if (dL <= dR && sL != null) at = sL;
-      else if (sR != null) at = sR - len;
+      const sA = S.seqs[i];
+      const sL = snap(sA, targets);
+      const sR = snap(sA + len, targets);
+      const dL = sL == null ? Infinity : Math.abs(xS(sL) - xS(sA));
+      const dR = sR == null ? Infinity : Math.abs(xS(sR) - xS(sA + len));
+      if (dL <= dR && sL != null) i = ordAtS(sL);
+      else if (sR != null) i = ordAtS(sR - len);
     }
-    p.at = at;
+    p.at = frameTs(clamp(i, 0, S.N - 1));
     clampPod(p);
   }
 
   // Lewa Krawędź: treść zostaje na miejscu, zmienia się tylko, od którego miejsca ją słychać.
-  function setPodIn(p, L, doSnap) {
-    L = quantAt(L);
-    if (doSnap) { const s = snap(L, snapTargets(p)); if (s != null) L = s; }
+  function setPodIn(p, s, doSnap) {
+    let L = S.seqs[clamp(ordAtS(s), 0, S.N - 1)];
+    if (doSnap) { const c = snap(L, snapTargets(p)); if (c != null) L = c; }
     const minLen = S.frameStep;
-    L = clamp(L, p.at - p.tin, p.at + podLen(p) - minLen);
+    const s0 = podStart(p), first = p.segs[0];
+    L = clamp(L, s0 - first.tin, s0 + (first.tout - first.tin) - minLen);
     L = Math.max(0, L);
-    const delta = L - p.at;
-    p.at = L;
-    p.tin += delta;
+    const delta = L - s0;
+    p.at = frameTs(clamp(ordAtS(L), 0, S.N - 1));
+    first.tin += delta;
     clampPod(p);
   }
 
   function setPodOut(p, R, doSnap) {
-    if (doSnap) { const s = snap(R, snapTargets(p)); if (s != null) R = s; }
+    if (doSnap) { const c = snap(R, snapTargets(p)); if (c != null) R = c; }
     const minLen = S.frameStep;
-    let len = R - p.at;
+    const last = p.segs[p.segs.length - 1];
+    const before = podLen(p) - (last.tout - last.tin);
+    let len = R - podStart(p);
     len = Math.round(len / S.frameStep) * S.frameStep;
-    len = clamp(len, minLen, p.duration - p.tin);
-    p.tout = p.tin + len;
+    len = clamp(len, before + minLen, before + (p.duration - last.tin));
+    last.tout = last.tin + (len - before);
     clampPod(p);
   }
 
-  // Krok o jedną Klatkę albo o 1 s. Sekunda liczona po czasie, nie po liczbie klatek ze
+  // Krok o jedną Klatkę albo o 1 s. Sekunda liczona po czasie Sekwencji, nie po liczbie klatek ze
   // średniego fps: w sklejce 30 + 60 fps średnia nie odpowiada żadnej z części.
   function stepIndex(i, dir, big) {
     if (!big) return i + dir;
-    const j = frameIndex(clamp(frameTs(i) + dir, 0, S.duration));
+    const j = ordAtS(clamp(S.seqs[clamp(i, 0, S.N)] + dir, 0, S.duration));
     return dir > 0 ? Math.max(j, i + 1) : Math.min(j, i - 1);
   }
 
   function stepPod(p, edge, dir, big) {
     if (edge === 'in') {
       const i = stepIndex(frameIndex(p.at), dir, big);
-      setPodIn(p, frameTs(clamp(i, 0, S.N - 1)), false);
+      setPodIn(p, S.seqs[clamp(i, 0, S.N - 1)], false);
     } else if (edge === 'out') {
       setPodOut(p, podEnd(p) + dir * (big ? 1 : S.frameStep), false);
     } else {
       const i = stepIndex(frameIndex(p.at), dir, big);
-      movePodTo(p, frameTs(clamp(i, 0, S.N - 1)), false);
+      movePodTo(p, S.seqs[clamp(i, 0, S.N - 1)], false);
     }
     fitView();
-    ensureVisible(edge === 'out' ? podEnd(p) : p.at);
+    ensureVisible(edge === 'out' ? podEnd(p) : podStart(p));
   }
 
   // ---------- Zbliżenia: pozycje, długość, Rampy ----------
@@ -428,20 +622,13 @@
     z.at = frameTs(ia);
     z.end = frameTs(clamp(ib, ia + 1, S.N));
   }
-  // Najbliższa granica Klatki (dla prawej Krawędzi i końca Rampy wyjścia).
-  function endIndexAt(t) {
-    if (t >= S.duration) return S.N;
-    const i = frameIndex(Math.max(0, t));
-    const t0 = frameTs(i), t1 = frameTs(i + 1);
-    return t - t0 > (t1 - t0) / 2 ? i + 1 : i;
-  }
-  // Sąsiedzi są twardą granicą: Zbliżenia nie nachodzą na siebie.
+  // Sąsiedzi są twardą granicą: Zbliżenia nie nachodzą na siebie. Zwraca indeksy Klatek.
   function zoomNeighbours(z) {
-    let lo = 0, hi = S.duration;
+    let lo = 0, hi = S.N;
     for (const o of S.zooms) {
       if (o === z) continue;
-      if (o.end <= z.at + 1e-6) lo = Math.max(lo, o.end);
-      else if (o.at >= z.end - 1e-6) hi = Math.min(hi, o.at);
+      if (o.end <= z.at + 1e-6) lo = Math.max(lo, frameIndex(o.end));
+      else if (o.at >= z.end - 1e-6) hi = Math.min(hi, frameIndex(o.at));
     }
     return { lo, hi };
   }
@@ -454,27 +641,27 @@
     }
   }
   function clampZoom(z) {
-    setZoomRange(z, frameIndex(clamp(z.at, 0, S.duration)), frameIndex(clamp(z.end, 0, S.duration)));
+    setZoomRange(z, nearestIdx(z.at), nearestEndIdx(z.end));
     const seen = new Map();
-    for (const q of z.keys) seen.set(quantAt(q.t), clampKadr(q.k));
+    for (const q of z.keys) seen.set(frameTs(nearestIdx(q.t)), clampKadr(q.k));
     z.keys = [...seen.entries()].map(([t, k]) => ({ t, k })).sort((p, q) => p.t - q.t);
     trimKeys(z);
     clampRamps(z);
   }
-  function moveZoomTo(z, at, doSnap) {
+  function moveZoomTo(z, s, doSnap) {
     const n = zoomFrames(z);
-    let ia = frameIndex(clamp(at, 0, S.duration));
+    let ia = clamp(ordAtS(s), 0, S.N - 1);
     if (doSnap) {
       const targets = snapTargets(z);
-      const tA = frameTs(ia), tB = frameTs(Math.min(ia + n, S.N));
+      const tA = S.seqs[ia], tB = S.seqs[Math.min(ia + n, S.N)];
       const sL = snap(tA, targets), sR = snap(tB, targets);
-      const dL = sL == null ? Infinity : Math.abs(xOf(sL) - xOf(tA));
-      const dR = sR == null ? Infinity : Math.abs(xOf(sR) - xOf(tB));
-      if (dL <= dR && sL != null) ia = frameIndex(sL);
-      else if (sR != null) ia = frameIndex(sR) - n;
+      const dL = sL == null ? Infinity : Math.abs(xS(sL) - xS(tA));
+      const dR = sR == null ? Infinity : Math.abs(xS(sR) - xS(tB));
+      if (dL <= dR && sL != null) ia = ordAtS(sL);
+      else if (sR != null) ia = ordAtS(sR) - n;
     }
     const { lo, hi } = zoomNeighbours(z);
-    ia = clamp(ia, frameIndex(lo), frameIndex(hi) - n);
+    ia = clamp(ia, lo, hi - n);
     const di = ia - frameIndex(z.at);
     for (const q of z.keys) q.t = frameTs(clamp(frameIndex(q.t) + di, 0, S.N - 1));
     setZoomRange(z, ia, ia + n);
@@ -482,40 +669,40 @@
     clampRamps(z);
   }
   // Krawędź zmienia przedział; pozycje Kadru zostają na swoich Klatkach, te poza przedziałem przepadają.
-  function setZoomIn(z, L, doSnap) {
-    if (doSnap) { const s_ = snap(L, snapTargets(z)); if (s_ != null) L = s_; }
-    let ia = frameIndex(clamp(L, 0, S.duration));
+  function setZoomIn(z, s, doSnap) {
+    if (doSnap) { const c = snap(s, snapTargets(z)); if (c != null) s = c; }
+    let ia = clamp(ordAtS(s), 0, S.N - 1);
     const { lo } = zoomNeighbours(z);
-    ia = clamp(ia, frameIndex(lo), frameIndex(z.end) - 1);
+    ia = clamp(ia, lo, frameIndex(z.end) - 1);
     setZoomRange(z, ia, frameIndex(z.end));
     trimKeys(z);
     clampRamps(z, 'in');
   }
-  function setZoomOut(z, R, doSnap) {
-    if (doSnap) { const s_ = snap(R, snapTargets(z)); if (s_ != null) R = s_; }
+  function setZoomOut(z, s, doSnap) {
+    if (doSnap) { const c = snap(s, snapTargets(z)); if (c != null) s = c; }
     const { hi } = zoomNeighbours(z);
-    const ib = clamp(endIndexAt(R), frameIndex(z.at) + 1, frameIndex(hi));
+    const ib = clamp(endIndexAtS(s), frameIndex(z.at) + 1, hi);
     setZoomRange(z, frameIndex(z.at), ib);
     trimKeys(z);
     clampRamps(z, 'out');
   }
   // Rampy: górne rogi; własne Krawędzie są celem Przyciągania, żeby „prawie zero” było zerem.
-  function setRampIn(z, t, doSnap) {
-    if (doSnap) { const s_ = snap(t, snapTargets(z, [z.at, z.end])); if (s_ != null) t = s_; }
-    z.rin = clamp(quantAt(t) - z.at, 0, zoomLen(z) - z.rout);
+  function setRampIn(z, s, doSnap) {
+    if (doSnap) { const c = snap(s, snapTargets(z, [seqOf(z.at), seqOf(z.end)])); if (c != null) s = c; }
+    z.rin = clamp(S.seqs[clamp(ordAtS(s), 0, S.N)] - seqOf(z.at), 0, zoomLen(z) - z.rout);
   }
-  function setRampOut(z, t, doSnap) {
-    if (doSnap) { const s_ = snap(t, snapTargets(z, [z.at, z.end])); if (s_ != null) t = s_; }
-    z.rout = clamp(z.end - frameTs(endIndexAt(t)), 0, zoomLen(z) - z.rin);
+  function setRampOut(z, s, doSnap) {
+    if (doSnap) { const c = snap(s, snapTargets(z, [seqOf(z.at), seqOf(z.end)])); if (c != null) s = c; }
+    z.rout = clamp(seqOf(z.end) - S.seqs[clamp(endIndexAtS(s), 0, S.N)], 0, zoomLen(z) - z.rin);
   }
   function stepZoom(z, part, dir, big) {
     const ia = frameIndex(z.at), ib = frameIndex(z.end);
-    if (part === 'in') setZoomIn(z, frameTs(clamp(stepIndex(ia, dir, big), 0, S.N - 1)), false);
-    else if (part === 'out') setZoomOut(z, frameTs(clamp(stepIndex(ib, dir, big), 1, S.N)), false);
-    else if (part === 'rin') setRampIn(z, frameTs(clamp(stepIndex(frameIndex(z.at + z.rin), dir, big), 0, S.N)), false);
-    else if (part === 'rout') setRampOut(z, frameTs(clamp(stepIndex(endIndexAt(z.end - z.rout), dir, big), 0, S.N)), false);
-    else moveZoomTo(z, frameTs(clamp(stepIndex(ia, dir, big), 0, S.N - 1)), false);
-    ensureVisible(part === 'out' || part === 'rout' ? z.end : z.at);
+    if (part === 'in') setZoomIn(z, S.seqs[clamp(stepIndex(ia, dir, big), 0, S.N - 1)], false);
+    else if (part === 'out') setZoomOut(z, S.seqs[clamp(stepIndex(ib, dir, big), 1, S.N)], false);
+    else if (part === 'rin') setRampIn(z, S.seqs[clamp(stepIndex(ordAtS(seqOf(z.at) + z.rin), dir, big), 0, S.N)], false);
+    else if (part === 'rout') setRampOut(z, S.seqs[clamp(stepIndex(endIndexAtS(seqOf(z.end) - z.rout), dir, big), 0, S.N)], false);
+    else moveZoomTo(z, S.seqs[clamp(stepIndex(ia, dir, big), 0, S.N - 1)], false);
+    ensureVisible(part === 'out' || part === 'rout' ? seqOf(z.end) : seqOf(z.at));
   }
   function removeZoom(id) {
     const i = S.zooms.findIndex((z) => z.id === id);
@@ -545,12 +732,6 @@
     S.sel = { zoom: nz.id, part: null };
     showStatus(`${z ? 'Zbliżenie rozcięte, nowe' : 'Zbliżenie'} ${fmtZoomLabel(nz)} ✓`, 'done', '', 2000);
     return true;
-  }
-
-  function partIndexAt(t) {
-    let idx = 0;
-    for (let i = 0; i < S.parts.length; i++) if (t >= S.parts[i].start - 1e-6) idx = i;
-    return idx;
   }
 
   function setGain(target, dir, fine) {
@@ -583,16 +764,20 @@
   }
 
   // Odtwarzanie Podkładów: każdy ma własny <audio>, dosuwany do wideo przy play/pauzie/seeku
-  // i gdy dryf przekroczy 120 ms. Eksport liczy ffmpeg, więc drobny dryf w podglądzie nie szkodzi.
+  // i gdy dryf przekroczy 120 ms (także na szwie odcinków). Eksport liczy ffmpeg, więc drobny dryf
+  // w podglądzie nie szkodzi. Niewykonane Wycięcie na Podkładzie jest już pominięte (podgląd wyniku).
   function syncPods(force) {
-    const t = curTime();
+    const s = seqOf(curTime());
     const playing = S.loaded && S.playing && !video.paused;
     for (const p of S.pods) {
       const a = p.audio;
       if (!a) continue;
-      const inside = t >= p.at - 1e-3 && t < podEnd(p);
-      if (playing && inside) {
-        const want = p.tin + (t - p.at);
+      let u = s - podStart(p);
+      let len = podLen(p);
+      const cr = cutPodRange(p);
+      if (cr) { if (u >= cr[0]) u += cr[1] - cr[0]; len -= cr[1] - cr[0]; }
+      const want = u >= -1e-3 && u < len + (cr ? cr[1] - cr[0] : 0) ? podContent(p, Math.max(0, u)) : null;
+      if (playing && want != null && s - podStart(p) < len) {
         if (a.paused || force || Math.abs(a.currentTime - want) > 0.12) {
           try { a.currentTime = want; } catch (e) { /* */ }
           if (a.paused) { const pr = a.play(); if (pr && pr.catch) pr.catch(() => {}); }
@@ -613,6 +798,11 @@
     if (hideAfter) S.statusTimer = setTimeout(() => { statusEl.hidden = true; }, hideAfter);
   }
   function hideStatus() { clearTimeout(S.statusTimer); statusEl.hidden = true; }
+  function blockedByCut() {
+    if (!S.cut) return false;
+    showStatus(CUT_BLOCK, 'error', '', 3000);
+    return true;
+  }
 
   // ---------- wczytywanie ----------
   function onLoaded(info, reason) {
@@ -621,18 +811,23 @@
     S.loaded = true;
     S.gen = info.gen;
     S.kind = info.kind;
-    S.duration = info.duration;
+    S.fileDuration = info.duration;
     S.frameStep = info.frameStep > 0 ? info.frameStep : 1 / 30;
-    S.frames = null;
-    S.N = Math.max(1, Math.ceil(S.duration / S.frameStep - 1e-6));
+    S.fileFrames = null;
+    S.scanned = false;
     S.wave = null;
     S.waveGain = 1;
     S.waveBin = info.waveBinSec || 0.005;
-    S.parts = info.parts || [{ name: info.name, start: 0, duration: info.duration }];
+    S.parts = (info.parts || [{ name: info.name, start: 0, duration: info.duration, src: 0, in: 0, out: info.duration }])
+      .map((p) => ({ name: p.name, src: p.src != null ? p.src : 0, start: p.start, duration: p.duration,
+        in: p.in != null ? p.in : 0, out: p.out != null ? p.out : p.duration }));
+    rebuildKept();
     S.left = 0;
     S.right = S.N;
     S.sel = null;
     S.drag = null;
+    S.cut = null;
+    S.undo = [];
     S.playing = false;
     S.lastT = 0;
     S.exporting = false;
@@ -665,35 +860,27 @@
     video.load();
   }
 
-  // Po zmianie Sekwencji Podkłady jadą razem z obrazem (Q1 rundy 3), playhead też.
-  // Zbliżenia są przywiązane do obrazu: za wstawionym Nagraniem jadą, rozcięte przez wstawienie
-  // wydłużają się (Kadr B zostaje na swojej Klatce), a leżące choć częściowo w usuwanym znikają.
+  // Po sklejeniu Podkłady, Zbliżenia i Playhead jadą razem z obrazem: Python daje `remap`
+  // ([[stary początek, stary koniec, przesunięcie], ...] dla każdego dawnego Nagrania w czasie pliku).
+  // Zbliżenie rozcięte przez wstawienie wydłuża się (pozycje zostają na swoich Klatkach).
   function applyShift(prevT) {
     const sh = S.pendingShift;
     S.pendingShift = null;
     let t = prevT;
-    if (sh && sh.inserted) {
-      const [index, dur] = sh.inserted;
-      const t0 = S.parts[index] ? S.parts[index].start : S.duration;
-      for (const p of S.pods) if (p.at >= t0 - 1e-6) p.at += dur;
-      for (const z of S.zooms) {
-        if (z.at >= t0 - 1e-6) { z.at += dur; z.end += dur; for (const q of z.keys) q.t += dur; }
-        else if (z.end > t0 + 1e-6) { z.end += dur; for (const q of z.keys) if (q.t >= t0 - 1e-6) q.t += dur; }
-      }
-      if (t >= t0) t += dur;
-    } else if (sh && sh.removed) {
-      const [t0, dur] = sh.removed;
-      for (const p of S.pods) {
-        if (p.at >= t0 + dur - 1e-6) p.at -= dur;
-        else if (p.at >= t0 - 1e-6) p.at = t0;
-      }
-      S.zooms = S.zooms.filter((z) => !(z.at < t0 + dur - 1e-6 && z.end > t0 + 1e-6));
-      for (const z of S.zooms) if (z.at >= t0 + dur - 1e-6) { z.at -= dur; z.end -= dur; for (const q of z.keys) q.t -= dur; }
-      if (t >= t0 + dur) t -= dur; else if (t >= t0) t = t0;
+    const rm = sh && sh.remap && sh.remap.length ? sh.remap : null;
+    if (rm) {
+      const map = (x) => {
+        let d = rm[0][2];
+        for (const [a, , delta] of rm) if (x >= a - 1e-6) d = delta;
+        return x + d;
+      };
+      for (const p of S.pods) p.at = map(p.at);
+      for (const z of S.zooms) { z.at = map(z.at); z.end = map(z.end); for (const q of z.keys) q.t = map(q.t); }
+      t = map(t);
     }
     for (const p of S.pods) clampPod(p);
     for (const z of S.zooms) clampZoom(z);
-    S.restoreT = clamp(t, 0, S.duration);
+    S.restoreT = clamp(t, 0, S.fileDuration);
   }
 
   async function fetchFrames(gen) {
@@ -702,16 +889,18 @@
       if (!r.ok || r.status === 204 || gen !== S.gen) return;
       const buf = await r.arrayBuffer();
       if (gen !== S.gen || buf.byteLength < 16) return;
-      const arr = new Float64Array(buf);
       const lt = frameTs(S.left);
       const rt = frameTs(S.right);
       const rightAtEnd = S.right >= S.N;
-      S.frames = arr;
-      S.N = arr.length;
+      S.fileFrames = new Float64Array(buf);
+      S.scanned = true;
+      rebuildKept();
       S.left = clamp(frameIndex(lt), 0, S.N - 1);
       S.right = rightAtEnd ? S.N : clamp(frameIndex(rt), S.left + 1, S.N);
       for (const p of S.pods) clampPod(p);
       for (const z of S.zooms) clampZoom(z);
+      fitView();
+      invalidateWave();
     } catch (e) { /* ignoruj */ }
   }
 
@@ -738,7 +927,7 @@
     a.preload = 'auto';
     const p = {
       gen: info.gen, name: info.name, duration: info.duration,
-      at: 0, tin: 0, tout: info.duration, gain: 1,
+      at: 0, segs: [{ tin: 0, tout: info.duration }], gain: 1,
       wave: null, waveGain: 1, waveBin: info.waveBinSec || 0.005, audio: a,
     };
     clampPod(p);
@@ -754,7 +943,7 @@
       S.busy = true;
       showStatus(`Sklejanie… ${ev.percent}%`, 'progress');
     } else if (ev.state === 'done') {
-      S.pendingShift = { inserted: ev.inserted || null, removed: ev.removed || null };
+      S.pendingShift = { remap: ev.remap || null };
       showStatus('Sklejanie… 100%', 'progress');
     } else if (ev.state === 'error') {
       S.busy = false;
@@ -810,7 +999,7 @@
   function mixSpec() {
     return {
       gain: S.gain,
-      podklady: S.pods.map((p) => ({ gen: p.gen, at: p.at, tin: p.tin, tout: p.tout, gain: p.gain })),
+      podklady: S.pods.map((p) => ({ gen: p.gen, at: p.at, segs: p.segs.map((s) => [s.tin, s.tout]), gain: p.gain })),
       zblizenia: S.zooms.map((z) => ({ at: z.at, end: z.end, rin: z.rin, rout: z.rout,
         keys: z.keys.map((q) => ({ t: q.t, x: q.k.x, y: q.k.y, s: q.k.s })) })),
     };
@@ -819,11 +1008,12 @@
   function doExport(mode) {
     if (!S.loaded || S.exporting || S.busy) return;
     if (!window.pywebview || !window.pywebview.api) return;
+    if (blockedByCut()) return;
     S.exporting = true;
     showStatus(mode === 'small' ? 'Mały ciach… 0%' : 'Ciach… 0%', 'progress');
-    const start = frameTs(S.left);
+    const start = S.left === 0 && S.headAtZero ? 0 : frameTs(S.left);
     const end = frameTs(S.right);
-    window.pywebview.api.export(start, end, mode || 'full', mixSpec()).then((r) => {
+    window.pywebview.api.export(start, end, mode || 'full', mixSpec(), holesIn(S.left, S.right)).then((r) => {
       if (r && r.ok === false) {
         S.exporting = false;
         showStatus('Błąd ✕', 'error', r.message || '');
@@ -832,6 +1022,193 @@
       S.exporting = false;
       showStatus('Błąd ✕', 'error', String(e));
     });
+  }
+
+  function syncParts() {
+    if (!window.pywebview || !window.pywebview.api) return;
+    window.pywebview.api.set_parts(S.parts.map((p) => ({ src: p.src, in: p.in, out: p.out }))).catch(() => {});
+  }
+
+  // ---------- Wycięcie ----------
+  // Wycięcie [a, b) to Klatki Sekwencji do usunięcia (na Podkładzie: Klatki, pod którymi leży
+  // usuwany kawałek muzyki). Istnieje najwyżej jedno; dopóki istnieje, edycja poza Suwakami czeka.
+  function cutBounds(c) {
+    if (c.pod == null) return { lo: 0, hi: S.N };
+    const p = podByGen(c.pod);
+    return { lo: frameIndex(p.at), hi: clamp(ordAtS(podEnd(p) + 1e-6), 0, S.N) };
+  }
+  // Musi zostać co najmniej jedna Klatka Sekwencji albo jedna Klatka muzyki Podkładu.
+  function enforceCutMin(c, which) {
+    if (c.pod == null) {
+      if (c.b - c.a > S.N - 1) { if (which === 'a') c.a = c.b - (S.N - 1); else c.b = c.a + S.N - 1; }
+    } else {
+      const maxLen = podLen(podByGen(c.pod)) - S.frameStep + 1e-6;
+      while (S.seqs[c.b] - S.seqs[c.a] > maxLen && c.b - c.a > 1) { if (which === 'a') c.a++; else c.b--; }
+    }
+  }
+  function setCutA(i) { const c = S.cut; c.a = clamp(i, cutBounds(c).lo, c.b - 1); enforceCutMin(c, 'a'); }
+  function setCutB(i) { const c = S.cut; c.b = clamp(i, c.a + 1, cutBounds(c).hi); enforceCutMin(c, 'b'); }
+  function cutRow(L) {
+    const c = S.cut;
+    if (c.pod == null) return { top: L.vidTop, h: L.vidH };
+    const row = L.rows.find((r) => r.gen === c.pod);
+    return row ? { top: row.top, h: row.h } : { top: L.vidTop, h: L.vidH };
+  }
+  function cutLabel(c) {
+    const sa = S.seqs[c.a], sb = S.seqs[c.b];
+    return c.pod == null ? `Wycięcie ${fmt(sa)}–${fmt(sb)} · ${fmtKl(c.b - c.a)}` : `Wycięcie Podkładu ${fmt(sa)}–${fmt(sb)}`;
+  }
+
+  // C: nowe Wycięcie w Playheadzie (na zaznaczonym Podkładzie: na nim); przy istniejącym dociąga
+  // bliższą Krawędź do Playheada (prawa wyłącznie: Klatka pod Playheadem zostaje).
+  function startCut() {
+    if (!S.loaded || S.busy || S.exporting) return;
+    if (!S.scanned) { showStatus('Poczekaj na analizę Klatek', 'error', '', 3000); return; }
+    if (S.playing) pause();
+    cancelPreviewDrag();
+    const i = clamp(frameIndex(curTime()), 0, S.N - 1);
+    if (S.cut) {
+      const c = S.cut;
+      if (i > c.a) setCutB(i); else if (i < c.a) setCutA(i);
+      return;
+    }
+    const sp = selPod();
+    const pod = sp ? sp.gen : null;
+    if (sp) {
+      const s = seqOf(curTime());
+      if (s < podStart(sp) - 1e-6 || s >= podEnd(sp) - S.frameStep / 2) { showStatus('Playhead poza Podkładem', 'error', '', 3000); return; }
+    } else if (S.N < 2) {
+      showStatus('Sekwencja ma tylko jedną Klatkę', 'error', '', 3000);
+      return;
+    } else if (S.sel) {
+      S.sel = null;
+    }
+    const c = { pod, a: i, b: i + 1 };
+    S.cut = c;
+    const secs = CUT_MIN_PX * (S.view.end - S.view.start) / cssWidth();
+    setCutB(Math.max(i + 1, ordAtS(S.seqs[i] + secs)));
+    if (c.b - c.a < 1) { S.cut = null; showStatus('Za mało miejsca na Wycięcie', 'error', '', 3000); return; }
+    showStatus('Wycięcie: C dociąga Krawędź do Playheada, Delete wycina, Esc porzuca', '', '', 4000);
+  }
+
+  function discardCut() {
+    if (!S.cut) return;
+    S.cut = null;
+    if (S.drag && S.drag.kind === 'cut') S.drag = null;
+    showStatus('Wycięcie porzucone', '', '', 1500);
+  }
+
+  function pushUndo() {
+    S.undo.push({
+      parts: S.parts.map((p) => ({ ...p })),
+      left: S.left, right: S.right, t: curTime(), sel: S.sel,
+      zooms: S.zooms.map((z) => ({ ...z, keys: z.keys.map((q) => ({ t: q.t, k: { ...q.k } })) })),
+      pods: S.pods.map((p) => ({ gen: p.gen, at: p.at, segs: p.segs.map((s) => ({ ...s })) })),
+    });
+    if (S.undo.length > UNDO_MAX) S.undo.shift();
+  }
+
+  function undo() {
+    if (!S.loaded || S.busy || S.exporting) return;
+    const u = S.undo.pop();
+    if (!u) { showStatus('Nie ma czego cofnąć', '', '', 1500); return; }
+    pause();
+    cancelPreviewDrag();
+    S.parts = u.parts;
+    rebuildKept();
+    S.zooms = u.zooms;
+    for (const q of u.pods) { const p = podByGen(q.gen); if (p) { p.at = q.at; p.segs = q.segs; } }
+    for (const p of S.pods) clampPod(p);
+    for (const z of S.zooms) clampZoom(z);
+    S.left = clamp(u.left, 0, S.N - 1);
+    S.right = clamp(u.right, S.left + 1, S.N);
+    S.sel = u.sel && typeof u.sel === 'object' ? (u.sel.pod != null ? (podByGen(u.sel.pod) ? u.sel : null)
+      : (zoomById(u.sel.zoom) ? u.sel : null)) : u.sel;
+    S.drag = null;
+    seek(u.t);
+    syncParts();
+    fitView();
+    invalidateWave();
+    showStatus('Cofnięto ✓', 'done', '', 1500);
+  }
+
+  // Wykonanie: Klatki [a, b) znikają z Sekwencji. Suwaki i Zbliżenia za nimi jadą z obrazem,
+  // Zbliżenia nachodzące są skracane (pozycje wewnątrz przepadają; gdy Kadr przejeżdżał przez
+  // Wycięcie, brzegi dostają pozycję, którą tam pokazywał, żeby zachowane Klatki wyglądały jak dotąd),
+  // Podkłady trzymają się swojej Klatki (z wyciętej: na szew). Miejsce cięcia jest Stykiem.
+  function cutFrames(a, b, msg) {
+    pushUndo();
+    const n = b - a;
+    const oldFrames = S.frames, oldSeqs = S.seqs;
+    const oldEnd = (i) => oldFrames[i] + (oldSeqs[i + 1] - oldSeqs[i]);
+    const rm = (i) => (i >= b ? i - n : i >= a ? a : i);
+    const zooms = [];
+    for (const z of S.zooms) {
+      const za = frameIndex(z.at), zb = frameIndex(z.end);
+      const nza = rm(za), nzb = zb >= b ? zb - n : Math.min(zb, a);
+      if (nzb - nza < 1) continue;
+      const keys = new Map();
+      if (za < a && zb > a && !kadrHolds(z, oldFrames[a - 1])) keys.set(a - 1, kadrKeys(z, oldFrames[a - 1]));
+      if (zb > b && za < b && !kadrHolds(z, oldFrames[b])) keys.set(a, kadrKeys(z, oldFrames[b]));
+      for (const q of z.keys) { const i = frameIndex(q.t); if (i < a || i >= b) keys.set(rm(i), q.k); }
+      if (!keys.size) keys.set(nza, kadrKeys(z, za < a ? oldFrames[za] : oldFrames[b]));
+      zooms.push({ z, za: nza, zb: nzb, keys: [...keys.entries()].sort((p, q) => p[0] - q[0]) });
+    }
+    const pods = S.pods.map((p) => rm(frameIndex(p.at)));
+    const left = rm(S.left);
+    const right = S.right >= b ? S.right - n : Math.min(S.right, a);
+    const play = rm(clamp(frameIndex(curTime()), 0, S.N - 1));
+    const parts = [];
+    for (let k = 0; k < S.pieces.length; k++) {
+      const pc = S.pieces[k], part = S.parts[k];
+      if (pc.ib <= a || pc.ia >= b) { parts.push(part); continue; }
+      const spans = [];
+      if (pc.ia < a) spans.push([pc.ia, Math.min(pc.ib, a)]);
+      if (pc.ib > b) spans.push([Math.max(pc.ia, b), pc.ib]);
+      for (const [ia, ib] of spans) parts.push({ ...part, in: oldFrames[ia] - part.start, out: oldEnd(ib - 1) - part.start });
+    }
+    S.parts = parts;
+    rebuildKept();
+    S.zooms = [];
+    for (const q of zooms) {
+      const z = q.z;
+      setZoomRange(z, q.za, q.zb);
+      z.keys = q.keys.map(([i, k]) => ({ t: frameTs(clamp(i, 0, S.N - 1)), k }));
+      clampZoom(z);
+      S.zooms.push(z);
+    }
+    if (S.sel && typeof S.sel === 'object' && S.sel.zoom != null && !zoomById(S.sel.zoom)) S.sel = null;
+    S.pods.forEach((p, k) => { p.at = frameTs(clamp(pods[k], 0, S.N - 1)); clampPod(p); });
+    S.left = clamp(left, 0, S.N - 1);
+    S.right = clamp(right, S.left + 1, S.N);
+    S.cut = null;
+    S.drag = null;
+    seekFrame(clamp(play, 0, S.N - 1));
+    syncParts();
+    fitView();
+    invalidateWave();
+    showStatus(msg, 'done', '', 2500);
+  }
+
+  function executeCut() {
+    const c = S.cut;
+    if (!c || !S.loaded || S.busy || S.exporting) return;
+    pause();
+    if (c.pod != null) {
+      const p = podByGen(c.pod);
+      if (!p) { S.cut = null; return; }
+      pushUndo();
+      const [ua, ub] = cutPodRange(p);
+      S.cut = null;
+      p.segs = cutSegs(p.segs, ua, ub);
+      clampPod(p);
+      fitView();
+      invalidateWave();
+      syncPods(true);
+      showStatus(`Wycięto ${fmt(ub - ua)} z Podkładu ✓`, 'done', '', 2500);
+      return;
+    }
+    cutFrames(c.a, c.b, `Wycięto ${fmtKl(c.b - c.a)} ✓`);
   }
 
   // ---------- wideo ----------
@@ -852,9 +1229,11 @@
   video.addEventListener('pause', () => { if (!video.ended) { S.playing = false; syncPods(true); } });
   video.addEventListener('error', () => {
     if (!S.loaded) return;
-    showStatus('Nie da się odtworzyć tego pliku (nieobsługiwany kodek)', 'error', '');
+    showStatus('Nie da się odtworzyć tego pliku (nieobsługiwany kodek)', 'error', '', 6000);
   });
 
+  // Pętla odtwarzania: koniec Fragmentu → początek; dziura po Wycięciu (i niewykonane Wycięcie
+  // Sekwencji) → przeskok do pierwszej Klatki za nią.
   function tick() {
     if (S.loaded && S.playing && !video.paused) {
       const t = curTime();
@@ -863,7 +1242,16 @@
         seekFrame(S.left);
         S.lastT = frameTs(S.left);
       } else {
-        S.lastT = t;
+        const i = frameIndex(t);
+        let jump = null;
+        if (i < S.N && i + 1 < S.N && t >= frameEnd(i) - 1e-6 && t < S.frames[i + 1]) jump = i + 1;
+        if (S.cut && S.cut.pod == null && i >= S.cut.a && i < S.cut.b) jump = S.cut.b;
+        if (jump != null) {
+          if (jump >= S.right || jump >= S.N) { seekFrame(S.left); S.lastT = frameTs(S.left); }
+          else { seekFrame(jump); S.lastT = frameTs(jump); }
+        } else {
+          S.lastT = t;
+        }
       }
       syncPods(false);
     }
@@ -915,7 +1303,7 @@
   }
 
   function buildWave(W, Hwave, dpr) {
-    const key = `${S.gen}|${W}|${Hwave}|${dpr}|${S.view.start}|${S.view.end}|${S.wave ? S.wave.length : 0}|${S.waveGain}`;
+    const key = `${S.gen}|${S.N}|${S.duration}|${W}|${Hwave}|${dpr}|${S.view.start}|${S.view.end}|${S.wave ? S.wave.length : 0}|${S.waveGain}`;
     if (key === waveKey && waveCanvas) return;
     waveKey = key;
     if (!waveCanvas) waveCanvas = document.createElement('canvas');
@@ -926,8 +1314,8 @@
     const v = S.view;
     const secPerPx = (v.end - v.start) / W;
     const paths = renderWave(g, W, Hwave, S.wave, S.waveGain, S.waveBin, (x) => {
-      const t = v.start + x * secPerPx;
-      return t < S.duration ? t : null;
+      const s = v.start + x * secPerPx;
+      return s < S.duration ? fileOf(s) : null;
     });
     if (!paths) return;
     g.fillStyle = C.peak; g.fill(paths[0]);
@@ -935,7 +1323,8 @@
   }
 
   function buildPodWave(p, W, Hwave, dpr) {
-    const key = `${W}|${Hwave}|${dpr}|${S.view.start}|${S.view.end}|${p.at}|${p.tin}|${p.tout}|${p.wave ? p.wave.length : 0}|${p.gain}`;
+    const segKey = p.segs.map((s) => `${s.tin}-${s.tout}`).join(',');
+    const key = `${W}|${Hwave}|${dpr}|${S.view.start}|${S.view.end}|${S.N}|${p.at}|${segKey}|${p.wave ? p.wave.length : 0}|${p.gain}`;
     const cached = podCanvases.get(p.gen);
     if (cached && cached.key === key) return cached.canvas;
     const c = document.createElement('canvas');
@@ -945,11 +1334,11 @@
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     const v = S.view;
     const secPerPx = (v.end - v.start) / W;
-    const end = podEnd(p);
+    const s0 = podStart(p), len = podLen(p);
     const paths = renderWave(g, W, Hwave, p.wave, p.waveGain * p.gain, p.waveBin, (x) => {
-      const t = v.start + x * secPerPx;
-      if (t < p.at || t >= end) return null;
-      return p.tin + (t - p.at);
+      const u = v.start + x * secPerPx - s0;
+      if (u < 0 || u >= len) return null;
+      return podContent(p, u);
     });
     if (paths) {
       g.fillStyle = C.podPeak; g.fill(paths[0]);
@@ -971,12 +1360,12 @@
 
   // ---------- Gniazda ----------
   function gniazda() {
-    // Kolejne indeksy wstawienia: 0 = przed pierwszym Nagraniem, parts.length = za ostatnim.
+    // Kolejne indeksy wstawienia: 0 = przed pierwszym Nagraniem, pieces.length = za ostatnim.
     const out = [];
-    const n = S.parts.length;
+    const n = S.pieces.length;
     for (let i = 0; i <= n; i++) {
-      const t = i < n ? S.parts[i].start : S.duration;
-      const x = xOf(t);
+      const s = i < n ? S.seqs[S.pieces[i].ia] : S.duration;
+      const x = xS(s);
       let x0;
       if (i === 0) x0 = x;
       else if (i === n) x0 = x - GN_W;
@@ -1022,9 +1411,9 @@
     const waveH = L.vidH;
     const rowsBottom = L.rulerTop - (L.stripTop != null ? STRIP_H : 0);
     const fullH = rowsBottom - waveTop;  // wiersz Sekwencji + wiersze Podkładów
-    const xl = xOf(frameTs(S.left));
-    const xr = xOf(frameTs(S.right));
-    const xe = xOf(S.duration);
+    const xl = xS(S.seqs[S.left]);
+    const xr = xS(S.seqs[S.right]);
+    const xe = xS(S.duration);
     const now = performance.now();
     const t = curTime();
     const xp = xOf(t);
@@ -1041,10 +1430,9 @@
     ctx.fillStyle = C.selection;
     ctx.fillRect(clamp(xl, 0, W), waveTop, clamp(xr, 0, W) - clamp(xl, 0, W), fullH);
     // Nagranie pod playheadem (to skasuje Delete) przy fokusie na wideo
-    if (S.parts.length > 1 && !S.sel) {
-      const pi = partIndexAt(t);
-      const p = S.parts[pi];
-      const a = clamp(xOf(p.start), 0, W), b = clamp(xOf(p.start + p.duration), 0, W);
+    if (S.pieces.length > 1 && !S.sel && !S.cut) {
+      const pc = S.pieces[pieceIndexAt(frameIndex(t))];
+      const a = clamp(xS(S.seqs[pc.ia]), 0, W), b = clamp(xS(S.seqs[pc.ib]), 0, W);
       ctx.fillStyle = C.current;
       ctx.fillRect(a, waveTop, b - a, waveH);
     }
@@ -1063,22 +1451,22 @@
     ctx.font = '10px "Segoe UI", system-ui, sans-serif';
     ctx.textBaseline = 'top';
     ctx.textAlign = 'left';
-    for (let i = 0; i < S.parts.length; i++) {
-      const p = S.parts[i];
-      const x = xOf(p.start);
+    for (let i = 0; i < S.pieces.length; i++) {
+      const pc = S.pieces[i];
+      const x = xS(S.seqs[pc.ia]);
       if (i > 0 && x >= 0 && x <= W) {
         ctx.fillStyle = C.styk;
         for (let y = waveTop; y < rowsBottom; y += 6) ctx.fillRect(Math.round(x), y, 1, 3);
       }
-      if (S.parts.length > 1) {
-        const x1 = xOf(p.start + p.duration);
+      if (S.pieces.length > 1) {
+        const x1 = xS(S.seqs[pc.ib]);
         if (x1 > 0 && x < W) {
           ctx.fillStyle = C.textDim;
           ctx.save();
           ctx.beginPath();
           ctx.rect(Math.max(0, x) + 2, waveTop, Math.max(0, Math.min(W, x1) - Math.max(0, x) - 4), 14);
           ctx.clip();
-          ctx.fillText(p.name, Math.max(0, x) + 4, waveTop + 2);
+          ctx.fillText(S.parts[i].name, Math.max(0, x) + 4, waveTop + 2);
           ctx.restore();
         }
       }
@@ -1090,10 +1478,11 @@
       const y0 = top + 4, y1 = top + h - 4;
       ctx.textBaseline = 'top';
       for (const z of S.zooms) {
-        const a = xOf(z.at), b = xOf(z.end);
+        const sa = seqOf(z.at), sb = seqOf(z.end);
+        const a = xS(sa), b = xS(sb);
         if (b < 0 || a > W) continue;
         const ax = clamp(a, -2, W + 2), bx = clamp(b, -2, W + 2);
-        const ra = clamp(xOf(z.at + z.rin), -2, W + 2), rb = clamp(xOf(z.end - z.rout), -2, W + 2);
+        const ra = clamp(xS(sa + z.rin), -2, W + 2), rb = clamp(xS(sb - z.rout), -2, W + 2);
         const isSel = S.sel && typeof S.sel === 'object' && S.sel.zoom === z.id;
         const part = isSel ? S.sel.part : undefined;
         ctx.beginPath();
@@ -1127,7 +1516,8 @@
     for (const row of L.rows) {
       const p = podByGen(row.gen);
       if (!p) continue;
-      const a = xOf(p.at), b = xOf(podEnd(p));
+      const s0 = podStart(p);
+      const a = xS(s0), b = xS(podEnd(p));
       if (b < 0 || a > W) continue;
       const ax = clamp(a, -2, W + 2), bx = clamp(b, -2, W + 2);
       const isSel = S.sel && typeof S.sel === 'object' && S.sel.pod === p.gen;
@@ -1136,6 +1526,15 @@
       ctx.fill();
       const wc = buildPodWave(p, W, row.h - 8, dpr);
       ctx.drawImage(wc, 0, 0, wc.width, wc.height, 0, row.top + 4, W, row.h - 8);
+      // szwy odcinków (po Wycięciach na Podkładzie)
+      let off = 0;
+      for (let k = 0; k + 1 < p.segs.length; k++) {
+        off += p.segs[k].tout - p.segs[k].tin;
+        const x = xS(s0 + off);
+        if (x < 0 || x > W) continue;
+        ctx.fillStyle = C.seam;
+        for (let y = row.top + 4; y < row.top + row.h - 4; y += 5) ctx.fillRect(Math.round(x), y, 1, 3);
+      }
       ctx.lineWidth = isSel && !S.sel.edge ? 2 : 1;
       ctx.strokeStyle = isSel && !S.sel.edge ? C.handleSel : C.podBorder;
       roundRect(ctx, ax + 0.5, row.top + 3.5, bx - ax - 1, row.h - 7, 4);
@@ -1162,6 +1561,27 @@
     ctx.fillStyle = C.outside;
     if (xl > 0) ctx.fillRect(0, waveTop, clamp(xl, 0, W), fullH);
     if (xr < W) ctx.fillRect(clamp(xr, 0, W), waveTop, W - clamp(xr, 0, W), fullH);
+
+    // Wycięcie: czerwony pas z dwiema Krawędziami w wierszu celu (Sekwencja albo Podkład)
+    if (S.cut) {
+      const c = S.cut;
+      const row = cutRow(L);
+      const xa = xS(S.seqs[c.a]), xb = xS(S.seqs[c.b]);
+      const ax = clamp(xa, -2, W + 2), bx = clamp(xb, -2, W + 2);
+      ctx.fillStyle = C.cutFill;
+      ctx.fillRect(ax, row.top + 1, bx - ax, row.h - 2);
+      const hot = S.drag && S.drag.kind === 'cut' ? S.drag.edge : null;
+      for (const [x, edge] of [[xa, 'a'], [xb, 'b']]) {
+        if (x < -GRIP_W || x > W + GRIP_W) continue;
+        ctx.fillStyle = hot === edge ? C.cutHot : C.cutBorder;
+        ctx.fillRect(Math.round(x) - 1, row.top + 1, 2, row.h - 2);
+        roundRect(ctx, Math.round(x) - 4, row.top + row.h / 2 - 9, 8, 18, 3);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(Math.round(x) - 1, row.top + row.h / 2 - 5, 1, 10);
+        ctx.fillRect(Math.round(x) + 1, row.top + row.h / 2 - 5, 1, 10);
+      }
+    }
 
     // Gniazda podczas przeciągania
     if (S.dragOver) {
@@ -1206,7 +1626,7 @@
     const last = Math.floor(S.view.end / step + 1e-9);
     for (let k = first; k <= last; k++) {
       const tt = k * step;
-      const x = xOf(tt);
+      const x = xS(tt);
       ctx.fillStyle = C.tick;
       ctx.fillRect(Math.round(x), rulerTop - 6, 1, 6);
       ctx.fillStyle = C.textDim;
@@ -1244,25 +1664,31 @@
     if (active) {
       const i = handleIndex(active);
       const x = active === 'left' ? xl : xr;
-      labels.push({ x, text: `${fmt(frameTs(i))} · kl. ${i}`, col: C.handleSel, prio: 1 });
+      labels.push({ x, text: `${fmt(S.seqs[i])} · kl. ${i}`, col: C.handleSel, prio: 1 });
+    }
+    if (S.cut) {
+      const c = S.cut;
+      const x = (xS(S.seqs[c.a]) + xS(S.seqs[c.b])) / 2;
+      labels.push({ x, text: cutLabel(c), col: C.cutBorder, prio: 2 });
     }
     const sp = selPod();
     if (sp) {
       const edge = S.sel.edge;
-      const tt = edge === 'out' ? podEnd(sp) : sp.at;
+      const tt = edge === 'out' ? podEnd(sp) : podStart(sp);
       const what = edge === 'in' ? 'początek' : edge === 'out' ? 'koniec' : 'Podkład';
-      labels.push({ x: xOf(tt), text: `${what} ${fmt(tt)}`, col: C.handleSel, prio: 1 });
+      labels.push({ x: xS(tt), text: `${what} ${fmt(tt)}`, col: C.handleSel, prio: 1 });
     }
     const sz = selZoom();
     if (sz) {
       const part = S.sel.part;
-      const tt = part === 'out' ? sz.end : part === 'rin' ? sz.at + sz.rin : part === 'rout' ? sz.end - sz.rout : sz.at;
+      const sa = seqOf(sz.at), sb = seqOf(sz.end);
+      const tt = part === 'out' ? sb : part === 'rin' ? sa + sz.rin : part === 'rout' ? sb - sz.rout : sa;
       const ramp = (r) => `Rampa ${r.toFixed(2).replace('.', ',')} s`;
       const what = part === 'in' ? 'początek' : part === 'out' ? 'koniec'
         : part === 'rin' ? ramp(sz.rin) : part === 'rout' ? ramp(sz.rout) : `Zbliżenie ${fmtZoomLabel(sz)}`;
-      labels.push({ x: xOf(tt), text: `${what} ${fmt(tt)}`, col: C.handleSel, prio: 1 });
+      labels.push({ x: xS(tt), text: `${what} ${fmt(tt)}`, col: C.handleSel, prio: 1 });
     }
-    if (xp >= 0 && xp <= W) labels.push({ x: xp, text: fmt(t), col: C.text, prio: 0 });
+    if (xp >= 0 && xp <= W) labels.push({ x: xp, text: fmt(seqOf(t)), col: C.text, prio: 0 });
     const gripBoxes = [];
     for (const kind of ['left', 'right']) {
       const x = kind === 'left' ? xl : xr;
@@ -1344,8 +1770,8 @@
 
   // ---------- mysz ----------
   function hitHandle(mx) {
-    const xl = xOf(frameTs(S.left));
-    const xr = xOf(frameTs(S.right));
+    const xl = xS(S.seqs[S.left]);
+    const xr = xS(S.seqs[S.right]);
     const hl = Math.abs(mx - xl) <= HIT || (mx >= xl && mx <= xl + GRIP_W);
     const hr = Math.abs(mx - xr) <= HIT || (mx <= xr && mx >= xr - GRIP_W);
     if (hl && hr) return mx < (xl + xr) / 2 ? 'left' : 'right';
@@ -1354,9 +1780,17 @@
     return null;
   }
 
-  // Co jest pod kursorem: {kind:'handle', which} | {kind:'pod', gen, edge} | {kind:'zoom', id, part} | {kind:'video'}
+  // Co jest pod kursorem: {kind:'cut', edge} | {kind:'handle', which} | {kind:'pod', gen, edge}
+  // | {kind:'zoom', id, part} | {kind:'video'}
   function hitTest(mx, my) {
     const L = layout(stripWanted());
+    if (S.cut) {
+      const row = cutRow(L);
+      if (my >= row.top && my < row.top + row.h) {
+        const dA = Math.abs(mx - xS(S.seqs[S.cut.a])), dB = Math.abs(mx - xS(S.seqs[S.cut.b]));
+        if (dA <= HIT || dB <= HIT) return { kind: 'cut', edge: dA <= dB ? 'a' : 'b' };
+      }
+    }
     if (my < L.vidTop + L.vidH) {
       const h = hitHandle(mx);
       return h ? { kind: 'handle', which: h } : { kind: 'video' };
@@ -1365,8 +1799,9 @@
       // górna połowa wiersza przy rogu = Rampa, reszta = Krawędź albo środek
       const upper = my < L.zoomRow.top + L.zoomRow.h / 2;
       for (const z of S.zooms) {
-        const a = xOf(z.at), b = xOf(z.end);
-        const ra = xOf(z.at + z.rin), rb = xOf(z.end - z.rout);
+        const sa = seqOf(z.at), sb = seqOf(z.end);
+        const a = xS(sa), b = xS(sb);
+        const ra = xS(sa + z.rin), rb = xS(sb - z.rout);
         const dRa = Math.abs(mx - ra), dRb = Math.abs(mx - rb);
         if (upper && (dRa <= HIT || dRb <= HIT)) return { kind: 'zoom', id: z.id, part: dRa <= dRb ? 'rin' : 'rout' };
         const dA = Math.abs(mx - a), dB = Math.abs(mx - b);
@@ -1380,7 +1815,7 @@
       if (my < row.top || my >= row.top + row.h) continue;
       const p = podByGen(row.gen);
       if (!p) break;
-      const a = xOf(p.at), b = xOf(podEnd(p));
+      const a = xS(podStart(p)), b = xS(podEnd(p));
       const dA = Math.abs(mx - a), dB = Math.abs(mx - b);
       if (dA <= HIT || dB <= HIT) {
         if (dA <= HIT && dB <= HIT) return { kind: 'pod', gen: p.gen, edge: mx < (a + b) / 2 ? 'in' : 'out' };
@@ -1395,10 +1830,20 @@
   }
 
   function handleIndexFromX(kind, mx) {
-    const t = tOf(mx);
-    if (t >= S.duration) return S.N;
-    if (t <= 0) return 0;
-    return frameIndex(t);
+    const s = sOf(mx);
+    if (s >= S.duration) return S.N;
+    if (s <= 0) return 0;
+    return ordAtS(s);
+  }
+
+  // Krawędź Wycięcia pod kursorem (z Przyciąganiem; Playhead pokazuje Klatkę pod Krawędzią).
+  function dragCutTo(mx, ctrl) {
+    const c = S.cut;
+    if (!c) return;
+    let s = clamp(sOf(mx), 0, S.duration);
+    if (!ctrl) { const t = snap(s, snapTargets(null, null, true)); if (t != null) s = t; }
+    if (S.drag.edge === 'a') { setCutA(ordAtS(s)); seekFrame(c.a); }
+    else { setCutB(endIndexAtS(s)); seekFrame(Math.min(c.b, S.N - 1)); }
   }
 
   canvas.addEventListener('pointerdown', (e) => {
@@ -1406,54 +1851,64 @@
     try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* syntetyczne zdarzenia */ }
     const mx = e.offsetX, my = e.offsetY;
     const h = hitTest(mx, my);
-    if (h.kind === 'handle') {
+    if (h.kind === 'cut') {
+      pause();
+      S.drag = { kind: 'cut', edge: h.edge };
+      dragCutTo(mx, e.ctrlKey);
+    } else if (h.kind === 'handle') {
       pause();
       S.sel = h.which;
       S.drag = { kind: h.which };
       moveHandleTo(h.which, handleIndexFromX(h.which, mx));
+    } else if (S.cut) {
+      // przy Wycięciu zaznaczenie stoi (cel Wycięcia jest stały): klik tylko ustawia Playhead
+      S.drag = { kind: 'scrub' };
+      seek(tOf(mx));
     } else if (h.kind === 'pod') {
       pause();
       const p = podByGen(h.gen);
       S.sel = { pod: h.gen, edge: h.edge };
-      S.drag = { kind: 'pod', gen: h.gen, edge: h.edge, grab: tOf(mx) - p.at };
+      S.drag = { kind: 'pod', gen: h.gen, edge: h.edge, grab: sOf(mx) - podStart(p) };
     } else if (h.kind === 'zoom') {
       pause();
       const z = zoomById(h.id);
       S.sel = { zoom: h.id, part: h.part };
-      S.drag = { kind: 'zoom', id: h.id, part: h.part, grab: tOf(mx) - z.at };
+      S.drag = { kind: 'zoom', id: h.id, part: h.part, grab: sOf(mx) - seqOf(z.at) };
     } else {
       S.sel = null;
       S.drag = { kind: 'scrub' };
-      seek(clamp(tOf(mx), 0, S.duration));
+      seek(tOf(mx));
     }
   });
 
   canvas.addEventListener('pointermove', (e) => {
     const mx = e.offsetX, my = e.offsetY;
     S.hoverX = mx;
-    S.hoverT = S.loaded ? clamp(tOf(mx), 0, extent()) : null;
+    S.hoverT = S.loaded ? clamp(sOf(mx), 0, extent()) : null;
     if (!S.loaded) return;
     if (S.drag) {
       if (S.drag.kind === 'scrub') {
-        seek(clamp(tOf(mx), 0, S.duration));
+        seek(tOf(mx));
+      } else if (S.drag.kind === 'cut') {
+        dragCutTo(mx, e.ctrlKey);
       } else if (S.drag.kind === 'pod') {
         const p = podByGen(S.drag.gen);
         if (p) {
           const doSnap = !e.ctrlKey;
-          if (S.drag.edge === 'in') setPodIn(p, tOf(mx), doSnap);
-          else if (S.drag.edge === 'out') setPodOut(p, tOf(mx), doSnap);
-          else movePodTo(p, tOf(mx) - S.drag.grab, doSnap);
+          if (S.drag.edge === 'in') setPodIn(p, sOf(mx), doSnap);
+          else if (S.drag.edge === 'out') setPodOut(p, sOf(mx), doSnap);
+          else movePodTo(p, sOf(mx) - S.drag.grab, doSnap);
         }
       } else if (S.drag.kind === 'zoom') {
         const z = zoomById(S.drag.id);
         if (z) {
           const doSnap = !e.ctrlKey;
-          const t = tOf(mx);
-          if (S.drag.part === 'in') setZoomIn(z, t, doSnap);
-          else if (S.drag.part === 'out') setZoomOut(z, t, doSnap);
-          else if (S.drag.part === 'rin') setRampIn(z, t, doSnap);
-          else if (S.drag.part === 'rout') setRampOut(z, t, doSnap);
-          else moveZoomTo(z, t - S.drag.grab, doSnap);
+          const s = sOf(mx);
+          if (S.drag.part === 'in') setZoomIn(z, s, doSnap);
+          else if (S.drag.part === 'out') setZoomOut(z, s, doSnap);
+          else if (S.drag.part === 'rin') setRampIn(z, s, doSnap);
+          else if (S.drag.part === 'rout') setRampOut(z, s, doSnap);
+          else moveZoomTo(z, s - S.drag.grab, doSnap);
         }
       } else {
         moveHandleTo(S.drag.kind, handleIndexFromX(S.drag.kind, mx));
@@ -1461,8 +1916,8 @@
       canvas.style.cursor = 'grabbing';
     } else {
       const h = hitTest(mx, my);
-      canvas.style.cursor = h.kind === 'handle' || (h.kind === 'pod' && h.edge) || (h.kind === 'zoom' && h.part) ? 'ew-resize'
-        : h.kind === 'pod' || h.kind === 'zoom' ? 'grab' : 'default';
+      canvas.style.cursor = h.kind === 'cut' || h.kind === 'handle' || (h.kind === 'pod' && h.edge) || (h.kind === 'zoom' && h.part) ? 'ew-resize'
+        : (h.kind === 'pod' || h.kind === 'zoom') && !S.cut ? 'grab' : 'default';
     }
   });
 
@@ -1499,14 +1954,14 @@
       const minSpan = Math.min(ext, Math.max(20 * S.frameStep, 0.2));
       const f = Math.pow(1.18, -delta / 100);
       const newSpan = clamp(span / f, minSpan, ext);
-      const t = tOf(e.offsetX);
-      let start = t - (t - v.start) * (newSpan / span);
+      const s = sOf(e.offsetX);
+      let start = s - (s - v.start) * (newSpan / span);
       start = clamp(start, 0, ext - newSpan);
       S.view = { start, end: start + newSpan };
       S.viewFull = newSpan >= ext - 1e-9;
     }
     invalidateWave();
-    S.hoverT = clamp(tOf(e.offsetX), 0, ext);
+    S.hoverT = clamp(sOf(e.offsetX), 0, ext);
   }, { passive: false });
 
   window.addEventListener('resize', () => invalidateWave());
@@ -1533,14 +1988,15 @@
 
   // Zaznaczone Zbliżenie nie przejmuje strzałek: chodzą po Klatkach jak bez zaznaczenia, żeby dało się
   // ustawiać Kadr klatka po klatce. Samo Zbliżenie przesuwa Ctrl+←/→ (z Shift: 1 s).
+  // Przy Wycięciu strzałki ruszają Playhead (żeby dojechać do Krawędzi i dociągnąć ją C) albo Suwak.
   function stepBy(dir, big) {
     if (!S.loaded) return;
-    const sp = selPod();
+    const sp = S.cut ? null : selPod();
     if (sp) { stepPod(sp, S.sel.edge, dir, big); return; }
     if (S.sel === 'left' || S.sel === 'right') {
       const i = stepIndex(handleIndex(S.sel), dir, big);
       moveHandleTo(S.sel, i);
-      ensureVisible(frameTs(handleIndex(S.sel)));
+      ensureVisible(S.seqs[handleIndex(S.sel)]);
       return;
     }
     if (S.playing) pause();
@@ -1552,17 +2008,19 @@
     else target = stepIndex(i, dir, big);
     target = clamp(target, 0, S.N - 1);
     seekFrame(target);
-    ensureVisible(frameTs(target));
+    ensureVisible(S.seqs[target]);
   }
 
   function volBy(dir, fine) {
     if (!S.loaded || S.kind !== 'video' || selZoom()) return;
+    if (blockedByCut()) return;
     const sp = selPod();
     setGain(sp || S, dir, fine);
   }
 
   function deleteSelected() {
     if (!S.loaded || S.busy || S.exporting) return;
+    if (S.cut) { executeCut(); return; }
     const sz = selZoom();
     if (sz) {
       // Rampa to ustawienie, nie element: Delete ją zeruje, całe Zbliżenie znika przy środku/Krawędzi.
@@ -1574,13 +2032,12 @@
     const sp = selPod();
     if (sp) { removePod(sp.gen); return; }
     if (S.sel) return;  // zaznaczony Suwak: Delete nic nie robi
-    if (S.parts.length > 1 && window.pywebview && window.pywebview.api) {
-      cancelPreviewDrag();
-      pause();
-      S.busy = true;
-      showStatus('Sklejanie… 0%', 'progress');
-      window.pywebview.api.remove_part(partIndexAt(curTime())).catch(() => { S.busy = false; });
-    }
+    // Nagranie pod Playheadem: to Wycięcie pokrywające całe Nagranie (Ctrl+Z cofa)
+    if (S.pieces.length < 2) { showStatus('Ostatniego Nagrania nie da się usunąć', 'error', '', 3000); return; }
+    cancelPreviewDrag();
+    pause();
+    const pc = S.pieces[pieceIndexAt(clamp(frameIndex(curTime()), 0, S.N - 1))];
+    cutFrames(pc.ia, pc.ib, 'Usunięto Nagranie ✓');
   }
 
   window.addEventListener('keydown', (e) => {
@@ -1589,11 +2046,18 @@
       if (!e.repeat) doExport('small');
       return;
     }
+    if (e.code === 'KeyZ' && e.ctrlKey && !e.altKey && !e.metaKey) {
+      e.preventDefault();
+      if (e.repeat) return;
+      if (S.cut) discardCut(); else undo();
+      return;
+    }
     if ((e.code === 'ArrowLeft' || e.code === 'ArrowRight') && e.ctrlKey && !e.altKey && !e.metaKey) {
       e.preventDefault();
       if (e.repeat) return;
       const sz = selZoom();
       if (!sz) return;
+      if (blockedByCut()) return;
       const dir = e.code === 'ArrowLeft' ? -1 : 1;
       const big = e.shiftKey, part = S.sel.part;
       stepZoom(sz, part, dir, big);
@@ -1623,7 +2087,7 @@
         const dir = e.code === 'ArrowUp' ? 1 : -1;
         const fine = e.shiftKey;
         volBy(dir, fine);
-        startRepeat(() => volBy(dir, fine));
+        if (!S.cut) startRepeat(() => volBy(dir, fine));
         break;
       }
       case 'Enter':
@@ -1632,10 +2096,16 @@
         if (!e.repeat) doExport('full');
         break;
       case 'Escape':
-        if (S.pdrag) cancelPreviewDrag(); else S.sel = null;
+        if (S.pdrag) cancelPreviewDrag();
+        else if (S.cut) discardCut();
+        else S.sel = null;
         break;
       case 'KeyZ':
+        if (S.cut) { if (!e.repeat) blockedByCut(); break; }
         S.zKey = true;
+        break;
+      case 'KeyC':
+        if (!e.repeat) startCut();
         break;
       case 'Delete':
       case 'Backspace':
@@ -1644,15 +2114,15 @@
         break;
       case 'Home': {
         e.preventDefault();
-        const sp = selPod();
-        if (sp) { movePodTo(sp, 0, false); fitView(); ensureVisible(sp.at); }
+        const sp = S.cut ? null : selPod();
+        if (sp) { movePodTo(sp, 0, false); fitView(); ensureVisible(podStart(sp)); }
         else if (S.sel === 'left' || S.sel === 'right') moveHandleTo(S.sel, 0);
         else { pause(); seekFrame(0); }
         break;
       }
       case 'End': {
         e.preventDefault();
-        const sp = selPod();
+        const sp = S.cut ? null : selPod();
         if (sp) { movePodTo(sp, Math.max(0, S.duration - podLen(sp)), false); fitView(); ensureVisible(podEnd(sp)); }
         else if (S.sel === 'left' || S.sel === 'right') moveHandleTo(S.sel, S.N);
         else { pause(); seekFrame(S.N - 1); }
@@ -1693,10 +2163,11 @@
     const sz = selZoom();
     if (!sz) return [];
     const { lo, hi } = zoomNeighbours(sz);
-    if (t < sz.at && t >= lo - 1e-6) {
+    const i = frameIndex(t);
+    if (i < frameIndex(sz.at) && i >= lo) {
       return [{ k: { ...sz.keys[0].k }, tag: 'Cień', col: C.kadrGhost, dashed: true, target: { z: sz, t, extend: 'in' } }];
     }
-    if (t >= sz.end - 1e-6 && t < hi - 1e-6) {
+    if (i >= frameIndex(sz.end) && i < hi) {
       return [{ k: { ...sz.keys[sz.keys.length - 1].k }, tag: 'Cień', col: C.kadrGhost, dashed: true, target: { z: sz, t, extend: 'out' } }];
     }
     return [];
@@ -1746,6 +2217,7 @@
 
   ov.addEventListener('pointerdown', (e) => {
     if (!S.loaded || S.kind !== 'video' || e.button !== 0) return;
+    if (S.cut) { blockedByCut(); return; }
     const R = videoRect();
     const p = normPt(e.offsetX, e.offsetY, R);
     if (S.zKey) {
@@ -1779,7 +2251,7 @@
       return;
     }
     if (S.zKey) { ov.style.cursor = 'crosshair'; return; }
-    const h = isPlaying() ? null : hitKadr(e.offsetX, e.offsetY);
+    const h = isPlaying() || S.cut ? null : hitKadr(e.offsetX, e.offsetY);
     ov.style.cursor = !h ? 'default' : h.kind === 'move' ? 'move'
       : (h.corner === 'nw' || h.corner === 'se') ? 'nwse-resize' : 'nesw-resize';
   });
@@ -1916,6 +2388,7 @@
     const snap = S.lastDrop && performance.now() - S.lastDrop.t < 3000 ? S.lastDrop : null;
     S.lastDrop = null;
     if (snap && (x == null || y == null)) { x = snap.x; y = snap.y; }
+    if (S.loaded && blockedByCut()) return 'cut';
     if (!S.loaded || x == null || y == null) { cancelPreviewDrag(); api.open_path(paths[0]); return 'open'; }
     const prevRect = snap ? snap.preview : previewEl.getBoundingClientRect();
     if (overPreview(x, y, prevRect)) { cancelPreviewDrag(); api.open_path(paths[0]); return 'open'; }
@@ -1957,7 +2430,7 @@
   if (window.pywebview && window.pywebview.api) announceReady();
   else window.addEventListener('pywebviewready', announceReady);
 
-  window.__ciach = { S, frameTs, frameIndex, video, dropFiles, layout, extent, podByGen,
-    zoomAt, kadrAt, kadrKeys, commitKadr, visibleKadry, videoRect, ov };
+  window.__ciach = { S, frameTs, frameIndex, seqOf, fileOf, ordAtS, holesIn, video, dropFiles, layout, extent, podByGen,
+    podStart, podEnd, podLen, zoomAt, kadrAt, kadrKeys, commitKadr, visibleKadry, videoRect, ov, startCut, executeCut, undo };
   requestAnimationFrame(tick);
 })();

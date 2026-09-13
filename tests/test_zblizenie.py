@@ -177,9 +177,9 @@ def main():
     assert len(vals) == 60 and blue_frames(vals) == list(range(15, 45)), blue_frames(vals)
 
     # bez Zbliżeń polecenie jest takie jak dawniej (bez filter_complex, kopia audio)
-    cmd = app.build_cmd(app.media, 1.0, 2.0, "x.mp4", "x264", None, False)
+    cmd = app.build_cmd(app.media, ciach.Fragment(1.0, 2.0), "x.mp4", "x264", None, False)
     assert "-filter_complex" not in cmd and "copy" in cmd
-    cmd = app.build_cmd(app.media, 1.0, 2.0, "x.mp4", "x264", None, True)
+    cmd = app.build_cmd(app.media, ciach.Fragment(1.0, 2.0), "x.mp4", "x264", None, True)
     assert "-filter_complex" in cmd and "[0:v:0]sendcmd=f=zoom.cmd,crop=w=iw:h=ih:x=0:y=0,scale=1280:720[v]" in cmd
 
     app.on_closing()

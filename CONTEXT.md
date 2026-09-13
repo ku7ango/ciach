@@ -6,7 +6,7 @@ Słownik pojęć używanych w komunikatach, nazwach plików, kodzie i dokumentac
 ## Language
 
 **Nagranie**:
-Jeden plik MP4 lub MP3 wczytany do aplikacji. Sekwencja i Podkłady składają się z Nagrań.
+Jeden plik MP4 lub MP3 wczytany do aplikacji albo jego ciągły kawałek, jaki został po wykonanym Wycięciu. Sekwencja i Podkłady składają się z Nagrań.
 _Avoid_: film, plik źródłowy, wsad, media, klip
 
 **Sekwencja**:
@@ -14,7 +14,7 @@ Uporządkowany ciąg Nagrań tego samego rodzaju sklejonych koniec do końca. To
 _Avoid_: sklejka, montaż, projekt, lista
 
 **Styk**:
-Granica między dwoma sąsiednimi Nagraniami w Sekwencji. Cel Przyciągania i miejsce Gniazda.
+Granica między dwoma sąsiednimi Nagraniami w Sekwencji, w tym miejsce po wykonanym Wycięciu. Cel Przyciągania i miejsce Gniazda.
 _Avoid_: szew, granica, cięcie, boundary
 
 **Gniazdo**:
@@ -22,15 +22,15 @@ Miejsce, w które można upuścić przeciągany plik: na Stykach i obu końcach 
 _Avoid_: strefa, drop zone, okienko, slot
 
 **Podkład**:
-Nagranie MP3 ułożone w osobnym wierszu pod Sekwencją wideo, z własną pozycją, Krawędziami i Głośnością. Jeden wiersz = jeden Podkład. Przy Ciachu miksuje się z dźwiękiem Sekwencji.
+Nagranie MP3 ułożone w osobnym wierszu pod Sekwencją wideo, z własną pozycją, Krawędziami i Głośnością. Jeden wiersz = jeden Podkład, także po Wycięciu: muzyka za Wycięciem dosuwa się do muzyki przed nim. Przy Ciachu miksuje się z dźwiękiem Sekwencji.
 _Avoid_: ścieżka, muzyka, track, warstwa, tło
 
 **Krawędź**:
-Lewy lub prawy brzeg Podkładu albo Zbliżenia. Przesunięcie Krawędzi Podkładu przycina go (treść zostaje na miejscu), Krawędzi Zbliżenia zmienia jego długość (przejazd A→B rozciąga się na nową długość); przesunięcie środka przesuwa całość.
+Lewy lub prawy brzeg Podkładu, Zbliżenia albo Wycięcia. Przesunięcie Krawędzi Podkładu przycina go (treść zostaje na miejscu), Krawędzi Zbliżenia zmienia jego długość (przejazd A→B rozciąga się na nową długość), Krawędzi Wycięcia zmienia jego zasięg; przesunięcie środka przesuwa całość (Wycięcia nie da się przesunąć).
 _Avoid_: uchwyt, brzeg, in/out, handle
 
 **Przyciąganie**:
-Automatyczne dociąganie Krawędzi przesuwanego Podkładu lub Zbliżenia do Styku, Suwaka, Playheada, końca Sekwencji lub Krawędzi innego Podkładu albo Zbliżenia, gdy znajdzie się blisko. Ctrl wyłącza.
+Automatyczne dociąganie Krawędzi przesuwanego Podkładu, Zbliżenia lub Wycięcia do Styku, Suwaka, Playheada, końca Sekwencji lub Krawędzi innego Podkładu albo Zbliżenia, gdy znajdzie się blisko. Ctrl wyłącza.
 _Avoid_: snap, magnes, dopasowanie
 
 **Głośność**:
@@ -66,7 +66,7 @@ Maksymalna liczba bajtów pliku wynikowego Małego Ciachu. Domyślnie wynika z o
 _Avoid_: budżet, cap, rozmiar docelowy
 
 **Zbliżenie**:
-Przedział na timeline, w którym widz zamiast całego obrazu widzi Kadr. Kadr ma pozycję na każdej Klatce przedziału: tam, gdzie użytkownik go ustawił, stoi dokładnie tak; między dwiema ustawionymi pozycjami przejeżdża liniowo; przed pierwszą i za ostatnią stoi w miejscu. Zbliżenia leżą w jednym wierszu i nie mogą na siebie nachodzić; narysowanie nowego Kadru wewnątrz Zbliżenia rozcina je i zaczyna następne. Przed i po Zbliżeniu widać cały obraz. Zbliżenie jest przywiązane do obrazu: usunięcie Nagrania, w którym choć częściowo leży, usuwa je.
+Przedział na timeline, w którym widz zamiast całego obrazu widzi Kadr. Kadr ma pozycję na każdej Klatce przedziału: tam, gdzie użytkownik go ustawił, stoi dokładnie tak; między dwiema ustawionymi pozycjami przejeżdża liniowo; przed pierwszą i za ostatnią stoi w miejscu. Zbliżenia leżą w jednym wierszu i nie mogą na siebie nachodzić; narysowanie nowego Kadru wewnątrz Zbliżenia rozcina je i zaczyna następne. Przed i po Zbliżeniu widać cały obraz. Zbliżenie jest przywiązane do obrazu: usunięcie Nagrania, w którym choć częściowo leży, usuwa je, a Wycięcie, które na nie nachodzi, skraca je o wycięte Klatki (pozycje Kadru z tych Klatek przepadają).
 _Avoid_: przybliżenie (to zoom widoku timeline'u kółkiem), zoom, najazd, efekt, crop, klucz, keyframe
 
 **Kadr**:
@@ -76,3 +76,11 @@ _Avoid_: kwadrat, ramka, okno, prostokąt, zaznaczenie, crop, Kadr A/B
 **Rampa**:
 Początkowy lub końcowy odcinek Zbliżenia, w którym obraz płynnie przechodzi z całości do Kadru (Rampa wejścia) albo z Kadru do całości (Rampa wyjścia); Kadr może się w tym czasie ruszać. Domyślnie zerowa: obraz wskakuje w Kadr od razu. Ustawiana górnym rogiem Zbliżenia.
 _Avoid_: przejście, easing, fade, najazd, wjazd
+
+**Wycięcie**:
+Zakres Sekwencji albo jednego Podkładu zaznaczony do usunięcia, zawsze co najmniej jedna Klatka. Powstaje klawiszem C w Playheadzie (na zaznaczonym Podkładzie: na nim, inaczej na Sekwencji); kolejne C dociąga bliższą Krawędź do Playheada. Delete wycina, Esc porzuca. Istnieje najwyżej jedno naraz i dopóki istnieje, można tylko oglądać (odtwarzanie je pomija), przesuwać Suwaki i poprawiać jego Krawędzie; Ciach i inna edycja czekają. Wycięcie zabiera czas tylko ścieżce, na której leży: Wycięcie Sekwencji przesuwa obraz, Suwaki i Zbliżenia za nim, a Podkłady trzymają się swojej Klatki obrazu (gdy ta przepadła, cofają się na Styk). Miejsce po wykonanym Wycięciu jest Stykiem.
+_Avoid_: obszar, zakres usuwania, cięcie, cut, dziura, wyrwa, region, selekcja
+
+**Cofnięcie**:
+Przywrócenie stanu sprzed ostatniego wykonanego Wycięcia albo usunięcia Nagrania (Ctrl+Z): wracają Nagrania, Suwaki, Playhead, Zbliżenia i pozycje Podkładów. Można cofać wiele razy, aż do ostatniej zmiany składu Sekwencji przez dodanie Nagrania albo do początku sesji. Nie ma ponawiania. Ctrl+Z przy niewykonanym Wycięciu porzuca je jak Esc.
+_Avoid_: undo, historia, wstecz, przywracanie

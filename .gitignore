@@ -15,3 +15,4 @@ tests/t*.png
 tests/s*.png
 tests/z*.png
 tests/__pycache__/
+tests/c*.png

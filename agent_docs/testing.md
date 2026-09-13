@@ -16,7 +16,9 @@ swoje eksporty; wzorzec `*_ciach*` skasował je raz.
 w `make_handler`). Body = JS, odpowiedź = wynik `evaluate_js` jako JSON. `CIACH_PORTFILE=<ścieżka>`
 zapisuje numer portu do pliku, bo exe bez konsoli nie ma stdout.
 
-W stronie `window.__ciach = { S, frameTs, frameIndex, video }` daje wgląd w stan timeline'u.
+W stronie `window.__ciach = { S, frameTs, frameIndex, seqOf, fileOf, ordAtS, video, ... }` daje wgląd w stan
+timeline'u. `S.scanned` mówi, że skan Klatek już przyszedł (wcześniej `S.frames` to siatka z fps);
+`S.frames` i `S.duration` to Klatki i długość Sekwencji (bez dziur), `S.fileDuration` to plik.
 Klawisze i mysz symulujemy przez `dispatchEvent(new KeyboardEvent(...))` / `PointerEvent` /
 `WheelEvent` na `window` lub na `#tl`.
 
@@ -53,12 +55,32 @@ Wynik eksportu weryfikuj przez `ffprobe -show_entries stream=nb_frames,start_tim
   Podkładu z Ctrl i Przyciąganie do Styku, Krawędzie, strzałki, Głośność, odtwarzanie Podkładu,
   Ciach z miksem, Delete Podkładu i Nagrania, podmianę sesji. Zrzuty `tests/s*.png`.
 
-Oba skrypty UI (`drive_ui.py`, `drive_seq.py`) robią zrzuty i zamykają okno **po PID procesu, który
-same uruchomiły** (`shot_window.ps1 -ProcId`, `close_app()`), nigdy po tytule „Ciach*”: użytkownik
-zwykle ma w tym czasie otwarte własne okno `Ciach.exe`.
+Skrypty UI (`drive_ui.py`, `drive_seq.py`, `drive_zoom.py`, `drive_cut.py`) robią zrzuty i zamykają
+okno **po PID procesu, który same uruchomiły** (`shot_window.ps1 -ProcId`, `close_app()`), nigdy po
+tytule „Ciach*”: użytkownik zwykle ma w tym czasie otwarte własne okno `Ciach.exe`.
+Nie uruchamiaj `drive_seq.py` i `drive_cut.py` naraz: oba eksportują `_seq_a_ciach.mp4` i jeden
+sprawdziłby plik drugiego. `drive_ui.py` przy przekierowaniu wyjścia do pliku potrzebuje
+`PYTHONIOENCODING=utf-8` (drukuje „✓”).
 
-`window.__ciach` daje dodatkowo `dropFiles`, `layout(withStrip)`, `extent()`, `podByGen(gen)`;
-`S.parts`, `S.pods`, `S.gain`, `S.sel` (null | 'left' | 'right' | {pod, edge} | {zoom, part}).
+`window.__ciach` daje dodatkowo `dropFiles`, `layout(withStrip)`, `extent()`, `podByGen(gen)`,
+`podStart/podEnd/podLen`, `holesIn(a, b)`, `startCut()`, `executeCut()`, `undo()`;
+`S.parts` (`{name, src, start, duration, in, out}`), `S.pieces` (`{ia, ib}` w Klatkach Sekwencji),
+`S.pods` (`at`, `segs`), `S.gain`, `S.cut`, `S.undo`, `S.sel` (null | 'left' | 'right' | {pod, edge} | {zoom, part}).
+
+## Testy Wycięć
+
+- `venv\Scripts\python tests\test_wyciecie.py`: backend bez okna. Sprawdza `Fragment` (dziury,
+  odcinki, czas Sekwencji, filtry), Ciach z dziurą (60 z 90 klatek, oba strumienie od zera, AAC),
+  Podkład za dziurą (trzyma Klatkę), Podkład z odcinkami (ton|cisza|ton), Zbliżenie przez szew
+  (statyczne, przejazd bez skoku, Rampa w czasie Sekwencji), Mały Ciach z dziurą, mp3 bez strat
+  (i Mały), sklejanie z kawałkami (kopia raz albo zdublowana, `remap`). Uruchamiany w CI.
+- `venv\Scripts\python tests\drive_cut.py [--exe]`: UI przez `/debug/js`. C w Playheadzie i
+  dociąganie Krawędzi (dalej, bliżej, przed początkiem), blokady (Enter, ↑, drop, Z), Krawędź myszą
+  z Ctrl i z Przyciąganiem do Styku, odtwarzanie pomijające Wycięcie, Esc, Delete (kawałki, Suwaki,
+  Zbliżenie z pozycjami na brzegach, Podkład na swojej Klatce, tytuł `+2`), Ciach z dziurą (85
+  klatek, AAC), Ctrl+Z, Wycięcie na Podkładzie (odcinki), Delete Nagrania jako Wycięcie (oba
+  kierunki), sklejanie po Wycięciu (kopia A zdublowana, Podkład i Zbliżenie jadą z obrazem, lista
+  cofnięć czyszczona). Zrzuty `tests/c*.png`.
 
 ## Testy Zbliżeń
 

@@ -179,17 +179,29 @@ def main():
     assert nf == 90 and len(audio) == 1 and audio[0]["codec_name"] == "aac"
     assert mean_volume(out2, 1.6, 2.9) > -25 and mean_volume(out2, 0, 1.4) < -60
 
-    # Usunięcie pierwszego Nagrania: zostaje samo B, bez pliku tymczasowego
-    old_tmp = app.media.path
-    app.remove_part(0)
-    ev = win.wait_for(lambda e: e["type"] == "loaded" and e["reason"] == "remove")
-    print("7 removed:", ev["info"]["name"], ev["info"]["duration"])
-    assert ev["info"]["name"] == "_seq_b.mp4" and len(ev["info"]["parts"]) == 1
-    assert not app.is_temp(app.media.path)
-    join_ev = [e for e in win.events if e["type"] == "join" and e["state"] == "done"][-1]
-    assert join_ev["reason"] == "remove" and abs(join_ev["removed"][1] - 4.0) < 0.01
-    time.sleep(1.0)
-    assert not os.path.exists(old_tmp), "plik tymczasowy nie został usunięty"
+    # Usunięcie Nagrania: UI robi to Wycięciem i przysyła nowy skład kawałków (`set_parts`);
+    # plik tymczasowy zostaje, a Ciach dostaje dziurę. Tu: samo B, tytuł bez „+1”.
+    tmp_path = app.media.path
+    r = app.set_parts([{"src": 1, "in": 0.0, "out": 2.5}])
+    assert r["ok"], r
+    assert len(app.media.parts) == 1 and app.media.path == tmp_path and win.title.endswith("_seq_a.mp4")
+    assert app.media.piece_range(app.media.parts[0]) == (4.0, 6.5)
+    assert not app.set_parts([{"src": 5, "in": 0, "out": 1}])["ok"] and not app.set_parts([])["ok"]
+    # Ciach [1.0, 5.0) z dziurą [2.0, 4.0): 30 klatek A + 30 klatek B, dźwięk przez tor miksu (AAC)
+    r = app.start_export(frames[30], frames[150], "full", None, [[frames[60], frames[120]]])
+    assert r["ok"], r
+    ev = win.wait_for(lambda e: e["type"] == "export" and e["state"] in ("done", "error"), 300)
+    assert ev["state"] == "done", ev
+    nf, audio = nb_frames(os.path.join(PROJ, ev["file"]))
+    d = probe(os.path.join(PROJ, ev["file"]), "stream=start_time:format=duration")
+    print("7 hole:", ev["file"], "frames", nf, "audio", [a["codec_name"] for a in audio], "dur", d["format"]["duration"],
+          "start", [x["start_time"] for x in d["streams"]])
+    assert nf == 60 and len(audio) == 1 and audio[0]["codec_name"] == "aac"
+    assert abs(float(d["format"]["duration"]) - 2.0) < 0.05
+    assert all(abs(float(x["start_time"])) < 0.002 for x in d["streams"])
+    # przywrócenie A (Cofnięcie w UI) to znów tylko set_parts
+    assert app.set_parts([{"src": 0, "in": 0.0, "out": 4.0}, {"src": 1, "in": 0.0, "out": 2.5}])["ok"]
+    assert win.title.endswith("_seq_a.mp4 +1")
 
     # Sekwencja mp3 + mp3: to samo sklejanie, wynik kopia 1:1; Podkład pod nią odrzucony
     gen_mp3(Q, 3.0, 500)

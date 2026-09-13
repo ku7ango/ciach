@@ -95,7 +95,7 @@ def handle_x(kind, W):
 
 def state():
     return js("(()=>{const S=window.__ciach.S;const v=window.__ciach.video;const st=document.getElementById('status');"
-              "return {loaded:S.loaded,kind:S.kind,N:S.N,frames:!!S.frames,wave:S.wave?S.wave.length:0,left:S.left,right:S.right,"
+              "return {loaded:S.loaded,kind:S.kind,N:S.N,frames:S.scanned,wave:S.wave?S.wave.length:0,left:S.left,right:S.right,"
               "sel:S.sel,dur:S.duration,view:S.view,t:v.currentTime,paused:v.paused,playing:S.playing,vdur:v.duration,"
               "status:st.hidden?null:st.textContent,title:document.title,cls:document.body.className}})()")
 
@@ -106,7 +106,7 @@ def status_text():
 
 wait("!!(window.__ciach && window.__ciach.S.loaded)", 60, "loaded")
 print("window+file loaded after %.1fs" % (time.time() - t_start))
-wait("!!window.__ciach.S.frames && !!window.__ciach.S.wave", 60, "frames+wave")
+wait("window.__ciach.S.scanned && !!window.__ciach.S.wave", 60, "frames+wave")
 wait("window.__ciach.video.readyState>=2", 30, "video ready")
 s = state()
 print("1 loaded:", s)
@@ -254,7 +254,7 @@ print("   probe:", pr.stdout.strip().replace("\n", " | "))
 
 # load mp3 via api
 js("window.pywebview.api.open_path(%s); true" % json.dumps(MP3))
-wait("window.__ciach.S.kind==='audio' && window.__ciach.S.loaded && !!window.__ciach.S.frames && !!window.__ciach.S.wave", 60, "mp3 loaded")
+wait("window.__ciach.S.kind==='audio' && window.__ciach.S.loaded && window.__ciach.S.scanned && !!window.__ciach.S.wave", 60, "mp3 loaded")
 time.sleep(0.5)
 s = state()
 print("14 mp3:", {k: s[k] for k in ("kind", "N", "dur", "cls", "title", "right")})
@@ -284,7 +284,7 @@ print("17 second export:", status_text())
 
 # cancel on close: start a long mp4 export and close the window
 js("window.pywebview.api.open_path(%s); true" % json.dumps(MP4))
-wait("window.__ciach.S.kind==='video' && window.__ciach.S.loaded && !!window.__ciach.S.frames", 60, "mp4 reload")
+wait("window.__ciach.S.kind==='video' && window.__ciach.S.loaded && window.__ciach.S.scanned", 60, "mp4 reload")
 key("Enter")
 time.sleep(1.0)
 print("18 long export status:", status_text())

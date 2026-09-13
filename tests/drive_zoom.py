@@ -124,7 +124,7 @@ def vrect():
 
 def state():
     return js("(()=>{const S=window.__ciach.S;const v=window.__ciach.video;const st=document.getElementById('status');"
-              "return {loaded:S.loaded,N:S.N,frames:!!S.frames,left:S.left,right:S.right,sel:S.sel,dur:S.duration,"
+              "return {loaded:S.loaded,N:S.N,frames:S.scanned,left:S.left,right:S.right,sel:S.sel,dur:S.duration,"
               "zooms:S.zooms.map(z=>({id:z.id,at:z.at,end:z.end,rin:z.rin,rout:z.rout,keys:z.keys})),zKey:S.zKey,"
               "t:v.currentTime,paused:v.paused,transform:v.style.transform,tlH:document.getElementById('tl').clientHeight,"
               "status:st.hidden?null:st.textContent,cursor:document.getElementById('ov').style.cursor}})()")
@@ -149,7 +149,7 @@ def finish():
 
 main_ok = False
 try:
-    wait("!!(window.__ciach && window.__ciach.S.loaded && window.__ciach.S.frames)", 60, "loaded")
+    wait("!!(window.__ciach && window.__ciach.S.loaded && window.__ciach.S.scanned)", 60, "loaded")
     s = state()
     print("1 loaded: N", s["N"], "tlH", s["tlH"])
     assert s["N"] == 120 and s["tlH"] == 110

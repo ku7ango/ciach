@@ -2,6 +2,27 @@
 
 Sekcja dla tagu `vX.Y` trafia do opisu release'u na GitHubie (workflow `release.yml`).
 
+## v1.3
+
+### Wycięcie (usuwanie kawałka nagrania)
+
+- **C** stawia wycięcie w playheadzie (czerwony pas z dwiema krawędziami), kolejne **C**
+  dociąga bliższą krawędź do playheada; krawędzie da się też przeciągać myszą z przyciąganiem.
+  **Delete** wycina, **Esc** porzuca. Odtwarzanie przy istniejącym wycięciu pomija je, więc
+  wynik słychać przed decyzją. Ciach, zbliżenia, głośność i dropy czekają, aż wycięcie zostanie
+  wykonane albo porzucone; suwaki wolno przesuwać.
+- Wycięcie na filmie: obraz, suwaki i zbliżenia za nim jadą w lewo, nachodzące zbliżenie jest
+  skracane, podkłady trzymają się swojej klatki obrazu. Miejsce cięcia to styk: nagranie rozpada
+  się na dwa (tytuł `+N`), między nimi jest gniazdo. Przy zaznaczonym podkładzie **C** wycina
+  kawałek muzyki (reszta dosuwa się).
+- **Ctrl+Z** cofa wykonane wycięcia i usunięcia nagrań, dowolnie wiele, aż do ostatniego
+  wstawienia nagrania.
+- Delete nagrania działa jak wycięcie całego nagrania: suwaki i zbliżenia za nim jadą z obrazem
+  (dotąd suwaki wracały na całość, a nachodzące zbliżenia znikały).
+- Wycięcie nie dotyka dysku: wynik składa ffmpeg przy ciachu (obraz `select`/`setpts`, dźwięk
+  `atrim`/`concat`; mp3 bez strat). Ciach fragmentu ze szwem koduje dźwięk do AAC 192 kbit/s;
+  w podglądzie na szwie odtwarzanie zacina się na ułamek sekundy. ADR 0002.
+
 ## v1.2
 
 ### Zbliżenie (powiększenie fragmentu obrazu)

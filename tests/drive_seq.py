@@ -111,8 +111,8 @@ def x_of(t):
 
 def state():
     return js("(()=>{const S=window.__ciach.S;const v=window.__ciach.video;const st=document.getElementById('status');"
-              "return {loaded:S.loaded,kind:S.kind,N:S.N,frames:!!S.frames,left:S.left,right:S.right,sel:S.sel,dur:S.duration,"
-              "parts:S.parts.map(p=>[p.name,p.start]),pods:S.pods.map(p=>({gen:p.gen,at:p.at,tin:p.tin,tout:p.tout,gain:p.gain,wave:!!p.wave,"
+              "return {loaded:S.loaded,kind:S.kind,N:S.N,frames:S.scanned,left:S.left,right:S.right,sel:S.sel,dur:S.duration,"
+              "parts:S.parts.map(p=>[p.name,p.start]),pods:S.pods.map(p=>({gen:p.gen,at:p.at,tin:p.segs[0].tin,tout:p.segs[p.segs.length-1].tout,segs:p.segs.map(s=>[s.tin,s.tout]),gain:p.gain,wave:!!p.wave,"
               "vol:p.audio?p.audio.volume:null,paused:p.audio?p.audio.paused:null})),gain:S.gain,vvol:v.volume,busy:S.busy,t:v.currentTime,"
               "paused:v.paused,view:S.view,ext:window.__ciach.extent(),tlH:document.getElementById('tl').clientHeight,"
               "status:st.hidden?null:st.textContent,title:document.title}})()")
@@ -139,7 +139,7 @@ def probe(path):
     return pr.stdout.strip().replace("\n", " | ")
 
 
-wait("!!(window.__ciach && window.__ciach.S.loaded && window.__ciach.S.frames)", 60, "loaded")
+wait("!!(window.__ciach && window.__ciach.S.loaded && window.__ciach.S.scanned)", 60, "loaded")
 s = state()
 print("1 loaded:", s["parts"], "N", s["N"], "tlH", s["tlH"])
 assert s["N"] == 120 and s["tlH"] == 110
@@ -167,7 +167,7 @@ assert len(state()["parts"]) == 1
 # sklejenie: B za A; Suwaki obejmują całość, tytuł +1
 r = drop([B], "gniazdo", 1)
 print("4 drop B:", r)
-wait("window.__ciach.S.parts.length===2 && !!window.__ciach.S.frames && !window.__ciach.S.busy", 60, "joined")
+wait("window.__ciach.S.parts.length===2 && window.__ciach.S.scanned && !window.__ciach.S.busy", 60, "joined")
 time.sleep(0.5)
 s = state()
 title = win_title()
@@ -184,7 +184,7 @@ time.sleep(0.3)
 s = state()
 p = s["pods"][0]
 print("   pod:", p, "tlH", s["tlH"], "ext", s["ext"], "sel", s["sel"])
-assert s["tlH"] == 154 and p["at"] == 0 and p["tin"] == 0 and abs(p["tout"] - 6.0) < 0.05
+assert s["tlH"] == 154 and abs(p["at"] - js("window.__ciach.frameTs(0)")) < 1e-6 and p["tin"] == 0 and abs(p["tout"] - 6.0) < 0.05
 assert s["sel"] == {"pod": p["gen"], "edge": None}
 assert abs(s["ext"] - 6.5) < 0.1  # wystaje nieznacznie? nie: 6.0 < 6.52 → ext = Sekwencja
 shot("s3_podklad.png")
@@ -197,15 +197,16 @@ drag(x0, ROW_Y, x1, ROW_Y, ctrl=True)
 s = state()
 p = s["pods"][0]
 print("6 moved:", p["at"], "ext", s["ext"])
-assert 0.9 < p["at"] < 1.1 and abs(s["ext"] - (p["at"] + 6.0)) < 0.01, "timeline rozciąga się do końca Podkładu"
+assert 0.9 < p["at"] < 1.1 and abs(s["ext"] - (js("window.__ciach.seqOf(%r)" % p["at"]) + 6.0)) < 0.01, "timeline rozciąga się do końca Podkładu"
 
 # Przyciąganie: dosunięcie lewej Krawędzi do Styku (4,0 s) z odległości ~5 px
 x0 = x_of(p["at"] + 0.5)
 x1 = x_of(4.0 + 0.5) + 5
 drag(x0, ROW_Y, x1, ROW_Y)
 p = state()["pods"][0]
-print("7 snapped:", p["at"])
-assert abs(p["at"] - 4.0) < 1e-6, "lewa Krawędź powinna przyciągnąć się do Styku"
+styk = js("window.__ciach.frameTs(window.__ciach.S.pieces[1].ia)")  # pierwsza Klatka B (po opóźnieniu AAC ~4,02 s)
+print("7 snapped:", p["at"], "styk", styk)
+assert abs(p["at"] - styk) < 1e-6, "lewa Krawędź powinna przyciągnąć się do Styku"
 # dwuklik: cały zakres z wystawaniem
 js("document.getElementById('tl').dispatchEvent(new MouseEvent('dblclick',{bubbles:true})); true")
 
@@ -218,7 +219,7 @@ def frame_index(t):
     return js("window.__ciach.frameIndex(%r)" % t)
 
 
-i0 = frame_index(4.0)
+i0 = frame_index(styk)
 key("ArrowRight")
 time.sleep(0.2)
 p = state()["pods"][0]
@@ -252,11 +253,11 @@ p2 = state()["pods"][0]
 assert abs(p2["tin"] - p["tin"] - 1 / 30) < 1e-3 and abs(p2["at"] - p["at"] - 1 / 30) < 1e-3
 # prawa Krawędź: dosunięcie do końca Sekwencji (Przyciąganie do S.duration)
 end = state()["pods"][0]
-xr = x_of(end["at"] + end["tout"] - end["tin"])
+xr = x_of(js("window.__ciach.seqOf(%r)" % end["at"]) + end["tout"] - end["tin"])
 drag(xr, ROW_Y, x_of(s["dur"]) - 4, ROW_Y)
 p3 = state()["pods"][0]
 print("11 edge out:", p3)
-assert abs(p3["at"] + p3["tout"] - p3["tin"] - s["dur"]) < 1e-3, "prawa Krawędź powinna przyciągnąć się do końca Sekwencji"
+assert abs(js("window.__ciach.seqOf(%r)" % p3["at"]) + p3["tout"] - p3["tin"] - s["dur"]) < 1e-3, "prawa Krawędź powinna przyciągnąć się do końca Sekwencji"
 shot("s5_krawedzie.png")
 
 # Esc → fokus na wideo; ↓ zmienia Głośność Sekwencji
@@ -308,7 +309,7 @@ assert not s["pods"] and s["tlH"] == 110 and abs(s["ext"] - s["dur"]) < 1e-6
 js("window.__ciach.video.currentTime = 5.0; true")
 time.sleep(0.2)
 key("Delete")
-wait("window.__ciach.S.parts.length===1 && !!window.__ciach.S.frames && !window.__ciach.S.busy", 60, "removed")
+wait("window.__ciach.S.parts.length===1 && window.__ciach.S.scanned && !window.__ciach.S.busy", 60, "removed")
 time.sleep(0.3)
 s = state()
 title = win_title()
@@ -320,11 +321,11 @@ assert s["t"] < 4.05, "playhead po usunięciu Nagrania za nim zostaje na jego da
 drop([P], "strip")
 wait("window.__ciach.S.pods.length===1", 30, "podklad 2")
 drop([B], "gniazdo", 0)
-wait("window.__ciach.S.parts.length===2 && !!window.__ciach.S.frames && !window.__ciach.S.busy", 60, "joined front")
+wait("window.__ciach.S.parts.length===2 && window.__ciach.S.scanned && !window.__ciach.S.busy", 60, "joined front")
 time.sleep(0.3)
 s = state()
-print("17 prepend:", s["parts"], "pod at", s["pods"][0]["at"], "right", s["right"])
-assert s["parts"][0][0] == "_seq_b.mp4" and abs(s["pods"][0]["at"] - 2.5) < 0.01 and s["right"] == s["N"]
+print("17 prepend:", s["parts"], "pod at", s["pods"][0]["at"], "pierwsza Klatka A", frame_ts(75), "right", s["right"])
+assert s["parts"][0][0] == "_seq_b.mp4" and abs(s["pods"][0]["at"] - frame_ts(75)) < 1e-6 and s["right"] == s["N"]
 shot("s6_prepend.png")
 
 # drop mp3 na Gniazdo → komunikat; mp4 na pasek → komunikat; drop obok → nic
@@ -334,7 +335,7 @@ assert len(state()["parts"]) == 2 and len(state()["pods"]) == 1
 
 # drop na podgląd: podmiana sesji, Podkłady znikają
 r = drop([A], "preview")
-wait("window.__ciach.S.parts.length===1 && window.__ciach.S.pods.length===0 && !!window.__ciach.S.frames", 60, "replaced")
+wait("window.__ciach.S.parts.length===1 && window.__ciach.S.pods.length===0 && window.__ciach.S.scanned", 60, "replaced")
 s = state()
 print("19 replaced:", r, s["parts"], "gain", s["gain"], "tlH", s["tlH"])
 assert s["gain"] == 1 and s["tlH"] == 110

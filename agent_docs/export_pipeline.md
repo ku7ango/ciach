@@ -117,6 +117,41 @@ Dlaczego tak, a nie prościej:
   szerokością), bo `-2:h` liczyłoby szerokość osobno dla każdej klatki o innym rozmiarze.
   Idzie do obu przebiegów two-pass. `crop` z `exact=0` sam wyrównuje w/h/x/y do parzystych.
 
+## Wycięcia (dziury w Fragmencie)
+
+Decyzja i powody: `docs/adr/0002-wyciecie-wirtualne.md`. Plik tymczasowy Sekwencji zostaje sklejką
+całych plików (`Media.copies`), a Nagrania to kawałki kopii (`Media.parts`: `{src, in, out}` w sekundach
+pliku źródłowego); to, czego nie ma w `parts`, jest dziurą. UI po każdym Wycięciu, usunięciu Nagrania
+i Cofnięciu przysyła nowy skład przez `Api.set_parts`, a przy Ciachu dodatkowo listę dziur wewnątrz
+Fragmentu (`holes`, w czasie pliku). `Fragment(start, end, holes)` trzyma zakres, dziury, `pre`,
+odcinki (`segments`) i przelicznik czasu pliku na czas Sekwencji (`seq`) i grafu (`graph`).
+
+- **Obraz**: za łańcuchem Zbliżenia (jeśli jest) idą `select='between(t,a,b)+...'` (tylko klatki
+  z zachowanych odcinków, z tym samym zapasem 0,5 ms co cięcie) i `setpts='PTS-(gte(T,h)*d+...)/TB'`
+  (każda klatka za dziurą dosunięta o jej długość, żeby znaczniki były ciągłe; bez tego vfr
+  zostawiłby zamrożony obraz). Baza czasu `demux` zostaje, klatki nie giną (`nb_frames` =
+  zachowane). sendcmd stoi **przed** `select`, więc czasy w pliku poleceń są nadal czasem pliku
+  minus `pre`; tylko wartości Kadru między pozycjami i Rampy liczą się w czasie Sekwencji
+  (`kadr_keys`/`ramp_factor` z `seq`), a granice dziur i końce Ramp są punktami podziału odcinków.
+- **Dźwięk**: kopia 1:1 nie umie pominąć dziury, więc Fragment z dziurą zawsze idzie torem miksu
+  (`mix = {gain 1, bez Podkładów}`, jedna ścieżka AAC 192k). W `mix_filters` dźwięk Sekwencji to
+  `asplit` → `atrim` per odcinek → `concat`; pierwszy odcinek zaczyna się w `pre` (graf 0), żeby
+  wyjściowy `-ss` ciął dźwięk i obraz w tym samym miejscu. Podkład dostaje `adelay` z `graph(at)`
+  (czas Sekwencji minus `pre`), więc gra ciągle przez szew; jego własne odcinki (`segs`, po Wycięciach
+  na Podkładzie) to też `atrim` + `concat`. `-t` = długość bez dziur.
+- **mp3**: filtrów nie ma (kopia), więc `cut_mp3` najpierw kopiuje każdy odcinek osobno (ten sam
+  dwustopniowy seek, ramka mp3 = Klatka) do katalogu tymczasowego, skleja concat demuxerem z tagami
+  z oryginału (`-i oryginał -map_metadata 1`) i dopiero na tym pliku działa zwykły tor mp3
+  (Ciach i Mały Ciach, zakres 0..długość). Na szwie możliwy minimalny trzask z rezerwuaru bitów.
+- Sklejanie po Wycięciu (`App.join`): sąsiednie kawałki tej samej kopii idą do listy concat raz,
+  wstawienie między dwa kawałki jednej kopii dubluje plik w sklejce. `join done` niesie `remap`
+  (`[[stary początek, stary koniec, przesunięcie], ...]` per dawne Nagranie), którym UI przesuwa
+  Podkłady, Zbliżenia i Playhead, dosuwając je do najbliższej Klatki (pierwsza Klatka sklejki leży
+  ~0,02 s od zera przez opóźnienie AAC, „ostatnia Klatka ≤ t” myliłaby się o jedną).
+
+Test: `tests/test_wyciecie.py` (dziury w obrazie i dźwięku, Zbliżenie przez szew, odcinki Podkładu, mp3,
+sklejanie z kawałkami).
+
 Test: `tests/test_zblizenie.py` mierzy `signalstats` (UAVG) per klatka na źródle
 czerwony | niebieski: Kadr w niebieskiej połowie daje klatkę całą niebieską, więc granice
 Zbliżenia, Rampy, przejazd między pozycjami i sklejka są sprawdzane co do klatki.
