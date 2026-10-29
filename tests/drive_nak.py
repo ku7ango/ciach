@@ -280,8 +280,9 @@ try:
     # Delete usuwa Nakładkę, Ctrl+Z przywraca ją z Kadrem i kluczem
     before = state()["naks"][0]
     key("Delete")
+    wait("document.getElementById('tl').clientHeight===110", 5, "timeline bez wiersza")  # przerysowanie w następnej klatce
     s = state()
-    assert not s["naks"] and s["tlH"] == 110 and s["sel"] is None
+    assert not s["naks"] and s["tlH"] == 110 and s["sel"] is None, (len(s["naks"]), s["tlH"], s["sel"], s["cut"], s["status"])
     key("KeyZ", ctrl=True)
     s = state()
     print("10 cofnięcie:", len(s["naks"]), s["status"])
