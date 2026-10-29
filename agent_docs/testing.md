@@ -55,7 +55,7 @@ Wynik eksportu weryfikuj przez `ffprobe -show_entries stream=nb_frames,start_tim
   Podkładu z Ctrl i Przyciąganie do Styku, Krawędzie, strzałki, Głośność, odtwarzanie Podkładu,
   Ciach z miksem, Delete Podkładu i Nagrania, podmianę sesji. Zrzuty `tests/s*.png`.
 
-Skrypty UI (`drive_ui.py`, `drive_seq.py`, `drive_zoom.py`, `drive_cut.py`) robią zrzuty i zamykają
+Skrypty UI (`drive_ui.py`, `drive_seq.py`, `drive_zoom.py`, `drive_cut.py`, `drive_nak.py`) robią zrzuty i zamykają
 okno **po PID procesu, który same uruchomiły** (`shot_window.ps1 -ProcId`, `close_app()`), nigdy po
 tytule „Ciach*”: użytkownik zwykle ma w tym czasie otwarte własne okno `Ciach.exe`.
 Nie uruchamiaj `drive_seq.py` i `drive_cut.py` naraz: oba eksportują `_seq_a_ciach.mp4` i jeden
@@ -92,7 +92,7 @@ sprawdziłby plik drugiego. `drive_ui.py` przy przekierowaniu wyjścia do pliku 
   (`_zoom_pre.mp4` z przodu), sprzątanie temp.
   Uruchamiany w CI (`release.yml`).
 - `venv\Scripts\python tests\drive_zoom.py [--exe]`: UI przez `/debug/js`. Kadry rysuje
-  `PointerEvent` na nakładce `#ov` (Z trzymane przez osobne keydown/keyup), Zbliżenia na `#tl`.
+  `PointerEvent` na warstwie `#ov` (Z trzymane przez osobne keydown/keyup), Zbliżenia na `#tl`.
   Pokrywa rysowanie (Zbliżenie na jedną Klatkę), Z + klik bez skutku, Cień poza przedziałem i
   wydłużenie przez jego złapanie, pozycję zapamiętaną rogiem na Klatce w środku przejazdu, rozcięcie
   przez Z + przeciągnięcie wewnątrz, przesuwanie z Ctrl (pozycje jadą razem), Przyciąganie Krawędzi
@@ -103,3 +103,19 @@ sprawdziłby plik drugiego. `drive_ui.py` przy przekierowaniu wyjścia do pliku 
   na nowo, bo podgląd się kurczy.
 - Oba skrypty zamykają okno po PID w `finally`, także po nieudanej asercji. Nigdy nie zabijaj
   procesów testu wzorcem na `CommandLine`: wzorzec pasuje też do powłoki, która go wykonuje.
+
+## Testy Nakładek
+
+- `venv\Scripts\python tests\test_nakladka.py`: backend bez okna. Źródła `_nak_base.mp4` (niebieski)
+  i `_nak_src.mp4` (zielone tło 0x00B140, czerwony prostokąt, ton 1 kHz). Sprawdza `key_yuv`, odrzucenia,
+  walidację, Ciach (klatki z Nakładką, przezroczyste tło, dźwięk), obrót, szew Wycięcia, Zbliżenie,
+  dwie warstwy z odcinkami, Mały Ciach. Uruchamiany w CI.
+- `venv\Scripts\python tests\drive_nak.py [--exe]`: UI przez `/debug/js`. Drop na pasek Nakładki,
+  automatyczny klucz, obraz z shadera przez `__ciach.nakPixel(x, y)` (piksel płótna WebGL zaraz po
+  narysowaniu; zrzut okna nie wystarczy), G (surowe tło, pipeta, kolor), skalowanie za róg, obrót z
+  Przyciąganiem i z Ctrl, przesuwanie, ←/→, ↑/↓, Krawędź, Wycięcie na Nakładce, Delete + Ctrl+Z,
+  transform `#nk` w trakcie Zbliżenia, Ciach. Zrzuty `tests/n*.png`.
+- Syntetyczne `PointerEvent` dostają w Chromium `offsetX` podzielony przez `devicePixelRatio` (na tej
+  maszynie 1,5), więc obsługa myszy w app.js liczy punkt z `clientX - rect` (`ovPoint`, `tlPoint`).
+- Przy DPI 150 % `shot_window.ps1` zapisuje tylko lewy górny wycinek okna (timeline poza kadrem).
+  Timeline da się obejrzeć przez `document.getElementById('tl').toDataURL()`.

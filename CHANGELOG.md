@@ -2,6 +2,26 @@
 
 Sekcja dla tagu `vX.Y` trafia do opisu release'u na GitHubie (workflow `release.yml`).
 
+## v1.4
+
+### Nakładka (nagranie z greenscreenem)
+
+- MP4 z zielonym tłem przeciągnięty na pasek nad timeline'em staje się nakładką: zielony wiersz
+  nad filmem, start w klatce upuszczenia. Zielone tło znika od razu na podglądzie; kolor klucza
+  wybiera się sam z narożników pierwszej klatki, a przytrzymane **G** pokazuje surowe tło
+  zaznaczonej nakładki i **G + klik** pobiera kolor spod kursora (osobno dla każdej nakładki).
+- Na obrazie: środek przesuwa, róg skaluje, pas przy rogu obraca (przyciąganie do 0/90/180/270°,
+  Shift co 15°). Na timeline jak podkład: przesuwanie, przycinanie krawędziami, ←/→, ↑/↓ głośność,
+  **C** wycięcie na nakładce, Delete. Kilka nakładek naraz, wyższy wiersz leży wyżej.
+- Nakładka jest częścią obrazu: zbliżenie powiększa ją razem z filmem. Wycięcie filmu przesuwa
+  nakładkę razem z jej klatką obrazu, nie skraca jej. Jej dźwięk wchodzi do miksu.
+- Ciach i mały ciach liczą ten sam klucz co podgląd (`chromakey` w YUV pliku + `despill`). ADR 0003.
+
+### Poprawki
+
+- Usunięcie podkładu można cofnąć (Ctrl+Z), tak jak usunięcie nakładki.
+- Nazwa drugiego podkładu po zmianie głośności rysowała się przycięta do ostatniej litery.
+
 ## v1.3
 
 ### Wycięcie (usuwanie kawałka nagrania)

@@ -2,7 +2,7 @@
 
 Jednoplikowy trimmer MP4/MP3 dla Windows 11. Bez instalacji: uruchom `Ciach.exe`,
 wrzuć plik, ustaw suwaki, wciśnij Enter. Wynik ląduje obok exe jako `<nazwa>_ciach.<ext>`.
-Słownik pojęć (Fragment, Suwak, Ciach, Mały Ciach) jest w `CONTEXT.md`.
+Słownik pojęć (Fragment, Suwak, Ciach, Mały Ciach, Nakładka) jest w `CONTEXT.md`.
 
 **Pobieranie:** gotowy `Ciach.exe` jest w zakładce
 [Releases](https://github.com/ku7ango/ciach/releases). Nie wymaga instalacji ani Pythona. Historia zmian: `CHANGELOG.md`.
@@ -72,13 +72,36 @@ Słownik pojęć (Fragment, Suwak, Ciach, Mały Ciach) jest w `CONTEXT.md`.
   do styków, suwaków, playheada, początku i końca filmu oraz innych podkładów; Ctrl podczas
   przeciągania wyłącza przyciąganie.
 - zaznaczony podkład albo jego krawędź: ←/→ przesuwa o klatkę (Shift: 1 s), Home / End
-  dosuwa do początku / końca filmu, Delete usuwa. Podkład jest zaczepiony w klatce obrazu:
-  po wstawieniu albo wycięciu nagrania przed nim jedzie razem z tą klatką. Podkład jest zaczepiony w klatce obrazu:
-  po wstawieniu albo wycięciu nagrania przed nim jedzie razem z tą klatką.
+  dosuwa do początku / końca filmu, Delete usuwa (Ctrl+Z przywraca). Podkład jest zaczepiony
+  w klatce obrazu: po wstawieniu albo wycięciu nagrania przed nim jedzie razem z tą klatką.
 - ↑/↓: głośność (5 %, z Shift 1 %) zaznaczonego podkładu, a bez zaznaczenia głośność filmu.
 - podkład może wystawać za koniec filmu (timeline się wtedy wydłuża); przy ciachu liczy się
   tylko fragment między suwakami. Dźwięk filmu i podkłady miksują się do jednej ścieżki AAC
   192 kbit/s; bez podkładów i przy głośności 100 % dźwięk jest kopiowany 1:1 jak dotąd.
+### Nakładka (nagranie z greenscreenem)
+
+- przeciągnij MP4 z zielonym tłem na pasek nad timeline'em (pojawia się podczas przeciągania):
+  powstaje zielony wiersz z nakładką, która zaczyna się w klatce, nad którą ją upuszczono. Każda
+  kolejna dodaje wiersz wyżej; wyższy wiersz leży wyżej na obrazie. Nakładka może mieć inną
+  rozdzielczość i fps niż film.
+- zielone tło znika od razu na podglądzie. Kolor klucza wybiera się sam z narożników pierwszej
+  klatki nakładki. Gdy tło jest inne albo zostają zielone plamy: zaznacz nakładkę na timeline,
+  przytrzymaj **G** (podgląd pokazuje jej surowe tło, kursor zmienia się w pipetę) i kliknij w tło
+  na obrazie. Kolor jest osobny dla każdej nakładki.
+- na obrazie (na pauzie): środek przesuwa, róg skaluje (proporcje zostają, przeciwległy róg
+  stoi), pas wewnątrz przy rogu obraca (kursor półkola; przyciąga do 0/90/180/270°, Ctrl wyłącza,
+  Shift co 15°). Nakładka może wystawać poza obraz, jej środek nie. Klik w nakładkę zaznacza ją
+  na timeline. Gdy nakładka zasłania Kadr zbliżenia, łapie się nakładkę; Z + przeciągnięcie
+  zawsze rysuje Kadr.
+- na timeline jak podkład: środek przesuwa, krawędź przycina, ←/→ przesuwa o klatkę (Shift
+  1 s), Home / End dosuwa, ↑/↓ głośność jej dźwięku, **C** stawia wycięcie na nakładce, Delete
+  usuwa (Ctrl+Z przywraca razem z położeniem i kolorem klucza). Wycięcie filmu nie skraca
+  nakładki, tylko ją przesuwa (trzyma się swojej klatki obrazu).
+- nakładka jest częścią obrazu: zbliżenie powiększa ją razem z filmem. W wyniku dźwięk nakładki
+  miksuje się z filmem i podkładami do jednej ścieżki AAC.
+- klucz w podglądzie (WebGL) i w ciachu (ffmpeg `chromakey` + `despill`) liczy to samo; decyzja:
+  `docs/adr/0003-nakladka.md`.
+
 ### Zbliżenie (powiększenie fragmentu obrazu)
 
 - przytrzymaj **Z** i przeciągnij myszą po obrazie: powstaje Kadr (prostokąt w proporcjach
@@ -137,4 +160,4 @@ exe na GitHubie i podepnie go pod release.
 
 Ustawienie zmiennej `CIACH_DEBUG=1` włącza endpoint `POST /debug/js` na lokalnym porcie
 (wykonuje JS w oknie), a `CIACH_PORTFILE=<ścieżka>` zapisuje numer portu do pliku.
-Służy wyłącznie do automatycznych testów UI (`tests/drive_ui.py`, `tests/drive_seq.py`, `tests/drive_zoom.py`, `tests/drive_cut.py`); domyślnie wyłączone.
+Służy wyłącznie do automatycznych testów UI (`tests/drive_ui.py`, `tests/drive_seq.py`, `tests/drive_zoom.py`, `tests/drive_cut.py`, `tests/drive_nak.py`); domyślnie wyłączone.

@@ -6,7 +6,7 @@ Słownik pojęć używanych w komunikatach, nazwach plików, kodzie i dokumentac
 ## Language
 
 **Nagranie**:
-Jeden plik MP4 lub MP3 wczytany do aplikacji albo jego ciągły kawałek, jaki został po wykonanym Wycięciu. Sekwencja i Podkłady składają się z Nagrań.
+Jeden plik MP4 lub MP3 wczytany do aplikacji albo jego ciągły kawałek, jaki został po wykonanym Wycięciu. Sekwencja, Podkłady i Nakładki składają się z Nagrań.
 _Avoid_: film, plik źródłowy, wsad, media, klip
 
 **Sekwencja**:
@@ -18,23 +18,31 @@ Granica między dwoma sąsiednimi Nagraniami w Sekwencji, w tym miejsce po wykon
 _Avoid_: szew, granica, cięcie, boundary
 
 **Gniazdo**:
-Miejsce, w które można upuścić przeciągany plik: na Stykach i obu końcach Sekwencji (nowe Nagranie) albo w pasku pod ścieżkami (nowy Podkład). Widoczne tylko podczas przeciągania.
+Miejsce, w które można upuścić przeciągany plik: na Stykach i obu końcach Sekwencji (nowe Nagranie), w pasku pod ścieżkami (nowy Podkład) albo w pasku nad nimi (nowa Nakładka, zaczyna się w Klatce upuszczenia). Widoczne tylko podczas przeciągania; pasek Nakładki tylko przy Sekwencji wideo.
 _Avoid_: strefa, drop zone, okienko, slot
 
 **Podkład**:
 Nagranie MP3 ułożone w osobnym wierszu pod Sekwencją wideo, z własną pozycją, Krawędziami i Głośnością. Jeden wiersz = jeden Podkład, także po Wycięciu: muzyka za Wycięciem dosuwa się do muzyki przed nim. Przy Ciachu miksuje się z dźwiękiem Sekwencji.
 _Avoid_: ścieżka, muzyka, track, warstwa, tło
 
+**Nakładka**:
+Nagranie MP4 z zielonym tłem ułożone w osobnym wierszu nad Sekwencją wideo: zielone tło znika (Kolor klucza), reszta obrazu leży na wierzchu obrazu Sekwencji. W czasie zachowuje się jak Podkład (własna pozycja, Krawędzie, Głośność, Wycięcie na niej, zaczep w Klatce obrazu). Na obrazie ma położenie: środek, szerokość (proporcje własne) i obrót; może częściowo wystawać poza obraz, a jej środek nie. Położenie jest stałe przez całą Nakładkę. Jeden wiersz = jedna Nakładka; wyższy wiersz to wyższa warstwa. Nakładki są częścią obrazu, więc Zbliżenie powiększa je razem z nim.
+_Avoid_: greenscreen, overlay, warstwa, wstawka, postać, klip
+
+**Kolor klucza**:
+Kolor tła Nakładki, który znika z obrazu (osobny dla każdej Nakładki). Na start wybierany sam z narożników pierwszej Klatki Nakładki; przytrzymane G pokazuje tło zaznaczonej Nakładki bez klucza, a G + klik w jej obraz pobiera kolor spod kursora.
+_Avoid_: chroma, kolor tła, zieleń, key
+
 **Krawędź**:
-Lewy lub prawy brzeg Podkładu, Zbliżenia albo Wycięcia. Przesunięcie Krawędzi Podkładu przycina go (treść zostaje na miejscu), Krawędzi Zbliżenia zmienia jego długość (przejazd A→B rozciąga się na nową długość), Krawędzi Wycięcia zmienia jego zasięg; przesunięcie środka przesuwa całość (Wycięcia nie da się przesunąć).
+Lewy lub prawy brzeg Podkładu, Nakładki, Zbliżenia albo Wycięcia. Przesunięcie Krawędzi Podkładu lub Nakładki przycina go (treść zostaje na miejscu), Krawędzi Zbliżenia zmienia jego długość (przejazd A→B rozciąga się na nową długość), Krawędzi Wycięcia zmienia jego zasięg; przesunięcie środka przesuwa całość (Wycięcia nie da się przesunąć).
 _Avoid_: uchwyt, brzeg, in/out, handle
 
 **Przyciąganie**:
-Automatyczne dociąganie Krawędzi przesuwanego Podkładu, Zbliżenia lub Wycięcia do Styku, Suwaka, Playheada, końca Sekwencji lub Krawędzi innego Podkładu albo Zbliżenia, gdy znajdzie się blisko. Ctrl wyłącza.
+Automatyczne dociąganie Krawędzi przesuwanego Podkładu, Nakładki, Zbliżenia lub Wycięcia do Styku, Suwaka, Playheada, końca Sekwencji lub Krawędzi innego Podkładu, Nakładki albo Zbliżenia, gdy znajdzie się blisko. Także obrót Nakładki dociąga się do 0°, 90°, 180° i 270°. Ctrl wyłącza.
 _Avoid_: snap, magnes, dopasowanie
 
 **Głośność**:
-Poziom dźwięku Podkładu albo całej Sekwencji, od 0 % (cisza) do 100 %. Zmieniana strzałkami ↑/↓ na zaznaczonym elemencie. Wchodzi w miks przy Ciachu.
+Poziom dźwięku Podkładu, Nakładki albo całej Sekwencji, od 0 % (cisza) do 100 %. Zmieniana strzałkami ↑/↓ na zaznaczonym elemencie. Wchodzi w miks przy Ciachu.
 _Avoid_: volume, gain, poziom, wzmocnienie
 
 **Klatka**:
@@ -78,9 +86,9 @@ Początkowy lub końcowy odcinek Zbliżenia, w którym obraz płynnie przechodzi
 _Avoid_: przejście, easing, fade, najazd, wjazd
 
 **Wycięcie**:
-Zakres Sekwencji albo jednego Podkładu zaznaczony do usunięcia, zawsze co najmniej jedna Klatka. Powstaje klawiszem C w Playheadzie (na zaznaczonym Podkładzie: na nim, inaczej na Sekwencji); kolejne C dociąga bliższą Krawędź do Playheada. Delete wycina, Esc porzuca. Istnieje najwyżej jedno naraz i dopóki istnieje, można tylko oglądać (odtwarzanie je pomija), przesuwać Suwaki i poprawiać jego Krawędzie; Ciach i inna edycja czekają. Wycięcie zabiera czas tylko ścieżce, na której leży: Wycięcie Sekwencji przesuwa obraz, Suwaki i Zbliżenia za nim, a Podkłady trzymają się swojej Klatki obrazu (gdy ta przepadła, cofają się na Styk). Miejsce po wykonanym Wycięciu jest Stykiem.
+Zakres Sekwencji albo jednego Podkładu lub Nakładki zaznaczony do usunięcia, zawsze co najmniej jedna Klatka. Powstaje klawiszem C w Playheadzie (na zaznaczonym Podkładzie lub Nakładce: na nim, inaczej na Sekwencji); kolejne C dociąga bliższą Krawędź do Playheada. Delete wycina, Esc porzuca. Istnieje najwyżej jedno naraz i dopóki istnieje, można tylko oglądać (odtwarzanie je pomija), przesuwać Suwaki i poprawiać jego Krawędzie; Ciach i inna edycja czekają. Wycięcie zabiera czas tylko ścieżce, na której leży: Wycięcie Sekwencji przesuwa obraz, Suwaki i Zbliżenia za nim, a Podkłady i Nakładki trzymają się swojej Klatki obrazu (gdy ta przepadła, cofają się na Styk). Miejsce po wykonanym Wycięciu jest Stykiem.
 _Avoid_: obszar, zakres usuwania, cięcie, cut, dziura, wyrwa, region, selekcja
 
 **Cofnięcie**:
-Przywrócenie stanu sprzed ostatniego wykonanego Wycięcia albo usunięcia Nagrania (Ctrl+Z): wracają Nagrania, Suwaki, Playhead, Zbliżenia i pozycje Podkładów. Można cofać wiele razy, aż do ostatniej zmiany składu Sekwencji przez dodanie Nagrania albo do początku sesji. Nie ma ponawiania. Ctrl+Z przy niewykonanym Wycięciu porzuca je jak Esc.
+Przywrócenie stanu sprzed ostatniego wykonanego Wycięcia albo usunięcia Nagrania, Podkładu lub Nakładki (Ctrl+Z): wracają Nagrania, Suwaki, Playhead, Zbliżenia, usunięte Podkłady i Nakładki oraz pozycje Podkładów i Nakładek (z położeniem i Kolorem klucza Nakładek). Można cofać wiele razy, aż do ostatniej zmiany składu Sekwencji przez dodanie Nagrania albo do początku sesji. Nie ma ponawiania. Ctrl+Z przy niewykonanym Wycięciu porzuca je jak Esc.
 _Avoid_: undo, historia, wstecz, przywracanie

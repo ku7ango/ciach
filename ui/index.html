@@ -9,6 +9,7 @@
 <div id="app">
   <div id="preview">
     <video id="video" preload="auto" playsinline disablepictureinpicture></video>
+    <canvas id="nk"></canvas>
     <canvas id="ov"></canvas>
     <div id="status" hidden></div>
     <div id="start">
@@ -18,7 +19,8 @@
         <div><b>Ciach</b> Enter pełna jakość · Ctrl+Enter mały ciach (do 25 MB)</div>
         <div><b>Sekwencja</b> kolejny MP4 w gniazdo na timeline (na początku, końcu, styku) · Delete bez zaznaczenia usuwa nagranie pod playheadem · Ctrl+Z cofa</div>
         <div><b>Wycięcie</b> C stawia zakres do usunięcia w playheadzie (na zaznaczonym podkładzie: na nim) · przejdź dalej i C dociąga krawędź · krawędzie także myszą · Delete wycina, Esc porzuca · odtwarzanie pomija wycięcie · Ctrl+Z cofa wycięcie</div>
-        <div><b>Podkład</b> MP3 na pasek pod timeline'em · środek przesuwa, krawędź przycina · Ctrl wyłącza przyciąganie · ↑/↓ głośność (Shift 1 %) · Delete usuwa</div>
+        <div><b>Podkład</b> MP3 na pasek pod timeline'em · środek przesuwa, krawędź przycina · Ctrl wyłącza przyciąganie · ↑/↓ głośność (Shift 1 %) · Delete usuwa (Ctrl+Z cofa)</div>
+        <div><b>Nakładka</b> MP4 z zielonym tłem na pasek nad timeline'em · na obrazie: środek przesuwa, róg skaluje, pas przy rogu obraca (Shift co 15°) · trzymaj G: surowe tło zaznaczonej nakładki, G + klik wybiera kolor klucza · na pasku: środek przesuwa, krawędź przycina · ←/→ przesuwa, ↑/↓ głośność · C wycięcie · Delete usuwa (Ctrl+Z cofa)</div>
         <div><b>Zbliżenie</b> Z + przeciągnij na obrazie: Kadr · na dalszych klatkach złap szary cień, żeby wydłużyć · na każdej klatce: środek Kadru przesuwa, róg skaluje (pozycja zapamiętana w tej klatce) · Z + przeciągnij wewnątrz: rozcięcie · na pasku: środek przesuwa, krawędź zmienia długość, górny róg rampa · Ctrl+←/→ przesuwa zaznaczone (Shift 1 s), zwykłe strzałki chodzą po klatkach · Delete usuwa (na rampie zeruje) · Esc odznacza</div>
       </div>
       <div id="reject"></div>

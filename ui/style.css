@@ -45,6 +45,28 @@ html, body {
   transform-origin: 0 0; /* Zbliżenie w podglądzie: translate + scale liczone w app.js */
 }
 
+/* Nakładki: WebGL nad filmem, ten sam transform Zbliżenia co #video (app.js drawOverlay) */
+#nk {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  transform-origin: 0 0;
+}
+body:not(.loaded) #nk, body.kind-audio #nk { display: none; }
+
+/* źródła Nakładek: muszą być w DOM, żeby dekoder dawał klatki do tekstury, ale niewidoczne */
+.naksrc {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 2px;
+  height: 2px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 #ov {
   position: absolute;
   inset: 0;

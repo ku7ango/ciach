@@ -1,6 +1,6 @@
 """Test UI Zbliżeń. Steruje oknem przez endpoint debugowy (CIACH_DEBUG=1), zrzuty przez
 PrintWindow po PID własnego procesu, bez SendKeys i bez zabierania fokusu. Kadry rysuje
-syntetycznymi PointerEvent na nakładce `#ov`, Zbliżenia na timeline na `#tl`.
+syntetycznymi PointerEvent na warstwie `#ov`, Zbliżenia na timeline na `#tl`.
 
 Użycie:  venv/Scripts/python tests/drive_zoom.py [--exe]
 Plik testowy `_zoom_src.mp4` (czerwony | niebieski) generuje test_zblizenie.py.

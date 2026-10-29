@@ -7,9 +7,10 @@ Cała interakcja to mysz na timeline i klawiatura (README.md ma pełną listę s
 Dwa rodzaje eksportu: **Ciach** (Enter, pełna jakość) i **Mały Ciach** (Ctrl+Enter, plik do 25 MB).
 Nagrania da się sklejać w **Sekwencję** (drop na Gniazdo na timeline), podkładać MP3 jako
 **Podkłady** (drop na pasek pod timeline'em), powiększać fragment obrazu jako **Zbliżenie**
-(Z + drag na podglądzie rysuje Kadr, własny wiersz na timeline) i usuwać kawałki jako
-**Wycięcie** (C stawia, C dociąga, Delete wycina, Esc porzuca, Ctrl+Z cofa); decyzje
-projektowe są w `docs/adr/`.
+(Z + drag na podglądzie rysuje Kadr, własny wiersz na timeline), usuwać kawałki jako
+**Wycięcie** (C stawia, C dociąga, Delete wycina, Esc porzuca, Ctrl+Z cofa) i nakładać MP4
+z greenscreenem jako **Nakładki** (drop na pasek nad timeline'em, zielone wiersze, klucz
+w shaderze podglądu i w ffmpeg, G = Kolor klucza); decyzje projektowe są w `docs/adr/`.
 Terminy domenowe są w `CONTEXT.md`; używaj ich w komunikatach, nazwach i kodzie.
 
 ## Stack i struktura
@@ -18,22 +19,27 @@ Terminy domenowe są w `CONTEXT.md`; używaj ich w komunikatach, nazwach i kodzi
   media z obsługą Range i dane binarne (`/api/wave`, `/api/frames`), ffprobe/ffmpeg robią
   analizę i eksport. Klasa `App` trzyma stan (bieżąca Sekwencja `media`: `copies` = pliki
   sklejone w pliku tymczasowym, `parts` = Nagrania jako kawałki kopii `{src, in, out}`; Podkłady
-  w `podklady`), `Api` to metody widoczne z JS (`set_parts` po każdym Wycięciu/Cofnięciu).
+  w `podklady`, Nakładki w `nakladki`), `Api` to metody widoczne z JS (`set_parts` po każdym
+  Wycięciu/Cofnięciu).
   Eksport dostaje `Fragment` (start, end, `holes` = wykonane Wycięcia w czasie pliku). Plan
   jakości Małego Ciachu to czysta funkcja `plan_small_video` (test: `tests/test_plan_small.py`);
   sklejanie i miks: `tests/test_sekwencja.py`; Zbliżenia (sendcmd + crop + scale,
   `zoom_commands`): `tests/test_zblizenie.py`; Wycięcia (select/setpts, atrim/concat, mp3,
-  sklejanie z kawałkami): `tests/test_wyciecie.py`.
+  sklejanie z kawałkami): `tests/test_wyciecie.py`; Nakładki (`key_yuv`, `nak_filters`: overlay
+  przed Zbliżeniem, rozsunięcie o dziury): `tests/test_nakladka.py`.
 - `ui/app.js` – cały frontend: stan `S`, timeline na canvasie (`draw`, układ wierszy w `layout`).
   Dwa czasy (ADR 0002): czas pliku (pts Klatek, dla `<video>` i ffmpeg) i czas Sekwencji (plik
   bez dziur po Wycięciach; `S.frames` = pts zachowanych Klatek, `S.seqs` = ich czas Sekwencji,
   `seqOf` / `fileOf` przeliczają, `rebuildKept` liczy to z `S.parts`). Suwaki i Wycięcie `S.cut`
   to indeksy Klatek Sekwencji, Podkłady mają zaczep `at` (pts) i odcinki `segs` (`{tin, tout}`),
   Zbliżenia pts Klatek (`at`, `end`) z pozycjami Kadru `keys` (`{t, k:{x, y, s}}`), długości
-  (Rampy, Podkłady) w sekundach Sekwencji. Nakładka Kadrów na podglądzie (`#ov`, `drawOverlay`,
+  (Rampy, Podkłady) w sekundach Sekwencji. Warstwa Kadrów na podglądzie (`#ov`, `drawOverlay`,
   transform na `<video>` w trakcie odtwarzania), klawiatura, pętla odtwarzania (`tick` pomija
   dziury, Podkłady przez własne `<audio>`), Cofnięcie `S.undo` (migawki), zdarzenia z Pythona
-  przez `window.ciachEvent`, routing dropów w `dropFiles`.
+  przez `window.ciachEvent`, routing dropów w `dropFiles`. Nakładki `S.naks` mają model czasu
+  Podkładu (funkcje `pod*` działają na obu, `trackByGen`/`selTrack`), położenie `pos` {x, y, s, r}
+  i Kolor klucza `key`; obraz rysuje WebGL na `#nk` (`drawNaks`, shader = `chromakey` + `despill`)
+  z ukrytych `<video class="naksrc">`.
 - `build.ps1` – venv, zależności, kopia ffmpeg/ffprobe z PATH, ikona, PyInstaller `--onefile`,
   wynik `Ciach.exe` w katalogu projektu (~200 MB, w środku pełny ffmpeg).
 - Python 3.14 + numpy (waveform), pywebview 6, PyInstaller 6. Brak .NET, Rusta i kompilatora C

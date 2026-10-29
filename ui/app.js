@@ -8,8 +8,9 @@
   const ctx = canvas.getContext('2d');
   const statusEl = document.getElementById('status');
   const rejectEl = document.getElementById('reject');
-  const ov = document.getElementById('ov');       // nakładka Kadrów na podglądzie
+  const ov = document.getElementById('ov');       // warstwa Kadrów i ramek Nakładek na podglądzie
   const octx = ov.getContext('2d');
+  const nk = document.getElementById('nk');       // obraz Nakładek (WebGL, klucz w shaderze)
 
   const C = {
     bg: '#1b1b1f',
@@ -25,6 +26,9 @@
     podBorder: 'rgba(138,164,255,0.55)',
     podPeak: '#5aa86a',
     podRms: '#9ad8a4',
+    nakFill: 'rgba(46,204,96,0.18)',
+    nakBorder: 'rgba(110,230,140,0.6)',
+    nak: '#3ecf6a',
     zoomFill: 'rgba(255,140,26,0.16)',
     zoomBorder: 'rgba(255,170,90,0.6)',
     kadr: '#ff8c1a',
@@ -49,6 +53,19 @@
   const VID_H = 68;    // wiersz Sekwencji (waveform)
   const ROW_H = 44;    // wiersz jednego Podkładu
   const ZOOM_H = 30;   // wiersz Zbliżeń
+  const NAK_H = 30;    // wiersz jednej Nakładki
+  // Klucz Nakładki: te same wartości i wzory co w ffmpeg (ciach.py KEY_SIMILARITY, KEY_BLEND, MATRIX, key_yuv)
+  const KEY_SIM = 0.10;
+  const KEY_BLEND = 0.08;
+  const KEY_DEFAULT = [0, 177, 64];
+  const MATRIX = {
+    bt709: { u: [-0.1146, -0.3854, 0.5], v: [0.5, -0.4542, -0.0458] },
+    bt601: { u: [-0.1687, -0.3313, 0.5], v: [0.5, -0.4187, -0.0813] },
+  };
+  const NAK_MIN = 0.03; // szerokość Nakładki jako ułamek szerokości obrazu
+  const NAK_MAX = 3;
+  const NAK_CORNER = 10; // róg Nakładki na podglądzie: skalowanie (px CSS)
+  const NAK_ROT = 26;    // pas wewnątrz przy rogu: obrót
   const KADR_MIN = 0.2; // najmniejszy Kadr: 20 % obrazu (5×)
   const CORNER = 7;    // uchwyt rogu Kadru na podglądzie (px CSS)
   const STRIP_H = 24;  // Gniazdo na nowy Podkład (tylko podczas przeciągania)
@@ -90,14 +107,15 @@
     left: 0,
     right: 1,
     // zaznaczenie: null (fokus na wideo) | 'left' | 'right' | {pod: gen, edge: null|'in'|'out'}
-    //              | {zoom: id, part: null|'in'|'out'|'rin'|'rout'}
+    //              | {nak: gen, edge: null|'in'|'out'} | {zoom: id, part: null|'in'|'out'|'rin'|'rout'}
     sel: null,
     width: 0,        // rozmiar obrazu Sekwencji (Kadry są ułamkami tych wymiarów)
     height: 0,
     zooms: [],       // Zbliżenia: {id, at, end, rin, rout, keys:[{t, k:{x,y,s}}]}; at/end/t = pts Klatek
     zoomSeq: 0,
     zKey: false,     // przytrzymane Z: rysowanie Kadru na podglądzie
-    pdrag: null,     // przeciąganie na podglądzie: {kind:'draw'|'move'|'resize', ...}
+    gKey: false,     // przytrzymane G: zaznaczona Nakładka bez klucza, klik pobiera kolor
+    pdrag: null,     // przeciąganie na podglądzie: {kind:'draw'|'move'|'resize'|'nak', ...}
     drag: null,
     view: { start: 0, end: 1 },
     viewFull: true,
@@ -110,8 +128,12 @@
     parts: [],       // Nagrania w Sekwencji: {name, src, start, duration, in, out} (start = kopia w pliku)
     gain: 1,         // Głośność Sekwencji
     pods: [],        // Podkłady: {gen, name, duration, at, segs:[{tin, tout}], gain, wave, waveGain, waveBin, audio}
-    cut: null,       // Wycięcie: {pod: gen|null, a, b} — Klatki [a, b) Sekwencji (na Podkładzie: pod nim)
-    undo: [],        // Cofnięcie: migawki sprzed wykonanych Wycięć i usunięć Nagrań
+    // Nakładki, od najniższej warstwy: jak Podkład (at, segs, gain; `audio` to jej <video>) plus położenie
+    // `pos` {x, y: środek jako ułamek obrazu, s: szerokość / szerokość obrazu, r: obrót w stopniach}
+    // i kolor klucza `key` [r, g, b]; `want` = czas w jej pliku pod Playheadem (null: niewidoczna)
+    naks: [],
+    cut: null,       // Wycięcie: {pod: gen|null, a, b} — Klatki [a, b) Sekwencji (`pod`: gen Podkładu albo Nakładki, na której leży)
+    undo: [],        // Cofnięcie: migawki sprzed wykonanych Wycięć i usunięć Nagrań, Podkładów i Nakładek
     busy: false,     // sklejanie w toku
     dragOver: null,  // {x, y, mp4, mp3} podczas przeciągania pliku z zewnątrz
     pendingShift: null,
@@ -282,6 +304,14 @@
   function podEnd(p) { return podStart(p) + podLen(p); }
   function podByGen(gen) { return S.pods.find((p) => p.gen === gen) || null; }
   function selPod() { return S.sel && typeof S.sel === 'object' && S.sel.pod != null ? podByGen(S.sel.pod) : null; }
+  // Nakładka ma ten sam model czasu co Podkład (zaczep `at`, odcinki `segs`), więc funkcje Podkładu
+  // (podStart, movePodTo, setPodIn/Out, stepPod, Wycięcie) działają na obu: „ścieżka” = Podkład albo Nakładka.
+  function nakByGen(gen) { return S.naks.find((n) => n.gen === gen) || null; }
+  function selNak() { return S.sel && typeof S.sel === 'object' && S.sel.nak != null ? nakByGen(S.sel.nak) : null; }
+  function trackByGen(gen) { return podByGen(gen) || nakByGen(gen); }
+  function selTrack() { return selPod() || selNak(); }
+  function selEdge() { return S.sel && typeof S.sel === 'object' ? S.sel.edge : null; }
+  function trackWord(p) { return p && p.pos ? 'Nakładka' : 'Podkład'; }
   // Czas w mp3 dla odległości `u` od początku Podkładu (null poza nim).
   function podContent(p, u) {
     if (u < 0) return null;
@@ -403,10 +433,11 @@
     return out;
   }
 
-  // Zakres timeline'u (czas Sekwencji): Sekwencja albo najdalej wystający Podkład.
+  // Zakres timeline'u (czas Sekwencji): Sekwencja albo najdalej wystający Podkład lub Nakładka.
   function extent() {
     let e = S.duration;
     for (const p of S.pods) e = Math.max(e, podEnd(p));
+    for (const n of S.naks) e = Math.max(e, podEnd(n));
     return e;
   }
 
@@ -427,21 +458,32 @@
   function xOf(t) { return xS(seqOf(t)); }
   function tOf(x) { return fileOf(clamp(sOf(x), 0, S.duration)); }
 
-  // Układ pionowy: wiersz Sekwencji, (wiersz Zbliżeń), wiersze Podkładów, (pasek Gniazda), linijka.
+  // Układ pionowy: (Gniazdo Nakładki), wiersze Nakładek (najwyższa warstwa u góry), wiersz Sekwencji,
+  // (wiersz Zbliżeń), wiersze Podkładów, (Gniazdo Podkładu), linijka. `strips`: {pod, nak} albo true (oba).
   function zoomRowWanted() { return S.kind === 'video' && S.zooms.length > 0; }
-  function layout(withStrip) {
+  function layout(strips) {
+    const st = strips === true ? { pod: true, nak: true } : (strips || {});
+    let y = TOP;
+    let nakStripTop = null;
+    if (st.nak) { nakStripTop = y; y += STRIP_H; }
+    const rowsTop = y;
+    const nakRows = [];
+    for (let k = S.naks.length - 1; k >= 0; k--) { nakRows.push({ gen: S.naks[k].gen, top: y, h: NAK_H }); y += NAK_H; }
+    const vidTop = y;
+    y += VID_H;
     const rows = [];
-    let y = TOP + VID_H;
     let zoomRow = null;
     if (zoomRowWanted()) { zoomRow = { top: y, h: ZOOM_H }; y += ZOOM_H; }
     for (const p of S.pods) { rows.push({ gen: p.gen, top: y, h: ROW_H }); y += ROW_H; }
     let stripTop = null;
-    if (withStrip) { stripTop = y; y += STRIP_H; }
-    return { vidTop: TOP, vidH: VID_H, zoomRow, rows, stripTop, rulerTop: y, H: y + BOTTOM };
+    if (st.pod) { stripTop = y; y += STRIP_H; }
+    return { rowsTop, vidTop, vidH: VID_H, nakStripTop, nakRows, zoomRow, rows, stripTop, rulerTop: y, H: y + BOTTOM };
   }
 
   function stripWanted() {
-    return !!(S.dragOver && S.dragOver.mp3 && S.loaded);
+    const d = S.dragOver;
+    if (!d || !S.loaded) return {};
+    return { pod: !!d.mp3, nak: !!d.mp4 && S.kind === 'video' };
   }
 
   function curTime() { return video.currentTime || 0; }
@@ -512,7 +554,7 @@
     const ts = [0, S.duration, S.seqs[S.left], S.seqs[S.right]];
     if (!noPlayhead) ts.push(seqOf(curTime()));
     for (let k = 1; k < S.pieces.length; k++) ts.push(S.seqs[S.pieces[k].ia]);
-    for (const p of S.pods) {
+    for (const p of [...S.pods, ...S.naks]) {
       if (p === except) continue;
       ts.push(podStart(p), podEnd(p));
     }
@@ -743,47 +785,61 @@
     S.volLabel = { until: performance.now() + VOL_LABEL_MS, text: `${Math.round(g * 100)} %`, pod: target === S ? null : target.gen };
   }
 
-  function removePod(gen) {
-    const i = S.pods.findIndex((p) => p.gen === gen);
-    if (i < 0) return;
-    const p = S.pods[i];
-    if (p.audio) { try { p.audio.pause(); p.audio.src = ''; } catch (e) { /* */ } }
-    S.pods.splice(i, 1);
-    if (S.sel && typeof S.sel === 'object' && S.sel.pod === gen) S.sel = null;
+  // Usunięcie Podkładu albo Nakładki jest krokiem Cofnięcia: element zostaje (wstrzymany), backend też
+  // go pamięta, więc Ctrl+Z przywraca go z pozycją, odcinkami, Kadrem Nakładki i kolorem klucza.
+  function removeTrack(gen) {
+    const p = trackByGen(gen);
+    if (!p) return;
+    pushUndo();
+    if (p.audio) { try { p.audio.pause(); } catch (e) { /* */ } }
+    if (p.pos) S.naks = S.naks.filter((q) => q !== p); else S.pods = S.pods.filter((q) => q !== p);
+    if (S.sel && typeof S.sel === 'object' && (S.sel.pod === gen || S.sel.nak === gen)) S.sel = null;
     if (S.drag && S.drag.kind === 'pod' && S.drag.gen === gen) S.drag = null;
-    if (window.pywebview && window.pywebview.api) window.pywebview.api.remove_podklad(gen).catch(() => {});
+    if (S.pdrag && S.pdrag.n === p) S.pdrag = null;
     fitView();
     invalidateWave();
+    showStatus(`Usunięto ${trackWord(p) === 'Nakładka' ? 'Nakładkę' : 'Podkład'} (Ctrl+Z cofa)`, 'done', '', 2000);
   }
 
   function clearPods() {
-    for (const p of S.pods) {
-      if (p.audio) { try { p.audio.pause(); p.audio.src = ''; } catch (e) { /* */ } }
+    for (const p of [...S.pods, ...S.naks]) {
+      if (p.audio) { try { p.audio.pause(); p.audio.removeAttribute('src'); p.audio.load(); } catch (e) { /* */ } }
+      if (p.audio && p.pos) p.audio.remove();
     }
     S.pods = [];
+    S.naks = [];
   }
 
-  // Odtwarzanie Podkładów: każdy ma własny <audio>, dosuwany do wideo przy play/pauzie/seeku
-  // i gdy dryf przekroczy 120 ms (także na szwie odcinków). Eksport liczy ffmpeg, więc drobny dryf
-  // w podglądzie nie szkodzi. Niewykonane Wycięcie na Podkładzie jest już pominięte (podgląd wyniku).
+  // Odtwarzanie Podkładów i Nakładek: każdy ma własny <audio> / <video>, dosuwany do wideo przy
+  // play/pauzie/seeku i gdy dryf przekroczy 120 ms (także na szwie odcinków). Eksport liczy ffmpeg, więc
+  // drobny dryf w podglądzie nie szkodzi. Niewykonane Wycięcie na ścieżce jest już pominięte (podgląd
+  // wyniku). Nakładka na pauzie stoi na Klatce pod Playheadem (`want`), żeby podgląd pokazywał obraz.
   function syncPods(force) {
     const s = seqOf(curTime());
     const playing = S.loaded && S.playing && !video.paused;
-    for (const p of S.pods) {
+    for (const p of [...S.pods, ...S.naks]) {
       const a = p.audio;
       if (!a) continue;
       let u = s - podStart(p);
       let len = podLen(p);
       const cr = cutPodRange(p);
       if (cr) { if (u >= cr[0]) u += cr[1] - cr[0]; len -= cr[1] - cr[0]; }
-      const want = u >= -1e-3 && u < len + (cr ? cr[1] - cr[0] : 0) ? podContent(p, Math.max(0, u)) : null;
-      if (playing && want != null && s - podStart(p) < len) {
+      let want = u >= -1e-3 && u < len + (cr ? cr[1] - cr[0] : 0) ? podContent(p, Math.max(0, u)) : null;
+      if (s - podStart(p) >= len) want = null;
+      if (p.pos) {
+        p.want = want;
+        if (!p.ready) continue;
+      }
+      if (playing && want != null) {
         if (a.paused || force || Math.abs(a.currentTime - want) > 0.12) {
           try { a.currentTime = want; } catch (e) { /* */ }
           if (a.paused) { const pr = a.play(); if (pr && pr.catch) pr.catch(() => {}); }
         }
-      } else if (!a.paused) {
-        a.pause();
+      } else {
+        if (!a.paused) a.pause();
+        if (p.pos && want != null && !a.seeking && (force || Math.abs(a.currentTime - want) > 0.01)) {
+          try { a.currentTime = want; } catch (e) { /* */ }
+        }
       }
     }
   }
@@ -838,7 +894,9 @@
     S.width = info.width || 0;
     S.height = info.height || 0;
     S.pdrag = null;
+    S.gKey = false;
     video.style.transform = '';
+    nk.style.transform = '';
     if (reason === 'open' || !wasLoaded) {
       clearPods();
       S.zooms = [];
@@ -874,11 +932,11 @@
         for (const [a, , delta] of rm) if (x >= a - 1e-6) d = delta;
         return x + d;
       };
-      for (const p of S.pods) p.at = map(p.at);
+      for (const p of [...S.pods, ...S.naks]) p.at = map(p.at);
       for (const z of S.zooms) { z.at = map(z.at); z.end = map(z.end); for (const q of z.keys) q.t = map(q.t); }
       t = map(t);
     }
-    for (const p of S.pods) clampPod(p);
+    for (const p of [...S.pods, ...S.naks]) clampPod(p);
     for (const z of S.zooms) clampZoom(z);
     S.restoreT = clamp(t, 0, S.fileDuration);
   }
@@ -897,7 +955,7 @@
       rebuildKept();
       S.left = clamp(frameIndex(lt), 0, S.N - 1);
       S.right = rightAtEnd ? S.N : clamp(frameIndex(rt), S.left + 1, S.N);
-      for (const p of S.pods) clampPod(p);
+      for (const p of [...S.pods, ...S.naks]) clampPod(p);
       for (const z of S.zooms) clampZoom(z);
       fitView();
       invalidateWave();
@@ -938,6 +996,44 @@
     showStatus(`Podkład: ${info.name}`, 'done', '', 2000);
   }
 
+  // Nowa Nakładka w Klatce upuszczenia, dopasowana do obrazu, wycentrowana w poziomie i dosunięta do dołu.
+  // Jej <video> leży w DOM (niewidoczny), bo z niego shader bierze teksturę; kolor klucza z narożników
+  // pierwszej Klatki, zanim Nakładka zacznie chodzić za Playheadem (`ready`).
+  function onNakladka(info, at) {
+    if (!S.loaded || S.kind !== 'video') return;
+    const v = document.createElement('video');
+    v.className = 'naksrc';
+    v.preload = 'auto';
+    v.playsInline = true;
+    v.disablePictureInPicture = true;
+    v.volume = 1;
+    document.body.appendChild(v);
+    const nw = info.width || 16, nh = info.height || 9;
+    const W = S.width || nw, H = S.height || nh;
+    const wpx = Math.min(W, H * nw / nh);
+    const n = {
+      gen: info.gen, name: info.name, duration: info.duration, width: nw, height: nh,
+      matrix: MATRIX[info.matrix] ? info.matrix : 'bt709', fullRange: !!info.fullRange, hasAudio: info.audioStreams > 0,
+      at: at != null ? at : frameTs(clamp(frameIndex(curTime()), 0, S.N - 1)), segs: [{ tin: 0, tout: info.duration }], gain: 1,
+      pos: { x: 0.5, y: 1 - (wpx * nh / nw) / (2 * H), s: wpx / W, r: 0 }, key: null,
+      audio: v, ready: false, want: null, tex: null,
+    };
+    v.addEventListener('loadeddata', () => {
+      if (n.ready) return;
+      if (!n.key) n.key = autoKey(n);
+      n.ready = true;
+      syncPods(true);
+    });
+    v.addEventListener('error', () => showStatus(`Nie da się odtworzyć Nakładki ${n.name} (nieobsługiwany kodek)`, 'error', '', 6000));
+    v.src = `/media?gen=${info.gen}`;
+    clampPod(n);
+    S.naks.push(n);
+    S.sel = { nak: n.gen, edge: null };
+    fitView();
+    invalidateWave();
+    showStatus(`Nakładka: ${info.name}`, 'done', '', 2000);
+  }
+
   function onJoin(ev) {
     if (ev.state === 'progress') {
       S.busy = true;
@@ -958,6 +1054,7 @@
       case 'frames': fetchFrames(ev.gen); break;
       case 'wave': fetchWave(ev.gen); break;
       case 'podklad': onPodklad(ev.info); break;
+      case 'nakladka': onNakladka(ev.info, ev.at); break;
       case 'join': onJoin(ev); break;
       case 'dropped': dropFiles(ev.paths, ev.x, ev.y); break;
       case 'reject':
@@ -1002,6 +1099,8 @@
       podklady: S.pods.map((p) => ({ gen: p.gen, at: p.at, segs: p.segs.map((s) => [s.tin, s.tout]), gain: p.gain })),
       zblizenia: S.zooms.map((z) => ({ at: z.at, end: z.end, rin: z.rin, rout: z.rout,
         keys: z.keys.map((q) => ({ t: q.t, x: q.k.x, y: q.k.y, s: q.k.s })) })),
+      nakladki: S.naks.map((n) => ({ gen: n.gen, at: n.at, segs: n.segs.map((s) => [s.tin, s.tout]), gain: n.gain,
+        x: n.pos.x, y: n.pos.y, s: n.pos.s, r: n.pos.r, key: n.key || KEY_DEFAULT })),
     };
   }
 
@@ -1034,7 +1133,7 @@
   // usuwany kawałek muzyki). Istnieje najwyżej jedno; dopóki istnieje, edycja poza Suwakami czeka.
   function cutBounds(c) {
     if (c.pod == null) return { lo: 0, hi: S.N };
-    const p = podByGen(c.pod);
+    const p = trackByGen(c.pod);
     return { lo: frameIndex(p.at), hi: clamp(ordAtS(podEnd(p) + 1e-6), 0, S.N) };
   }
   // Musi zostać co najmniej jedna Klatka Sekwencji albo jedna Klatka muzyki Podkładu.
@@ -1042,7 +1141,7 @@
     if (c.pod == null) {
       if (c.b - c.a > S.N - 1) { if (which === 'a') c.a = c.b - (S.N - 1); else c.b = c.a + S.N - 1; }
     } else {
-      const maxLen = podLen(podByGen(c.pod)) - S.frameStep + 1e-6;
+      const maxLen = podLen(trackByGen(c.pod)) - S.frameStep + 1e-6;
       while (S.seqs[c.b] - S.seqs[c.a] > maxLen && c.b - c.a > 1) { if (which === 'a') c.a++; else c.b--; }
     }
   }
@@ -1051,15 +1150,16 @@
   function cutRow(L) {
     const c = S.cut;
     if (c.pod == null) return { top: L.vidTop, h: L.vidH };
-    const row = L.rows.find((r) => r.gen === c.pod);
+    const row = L.rows.find((r) => r.gen === c.pod) || L.nakRows.find((r) => r.gen === c.pod);
     return row ? { top: row.top, h: row.h } : { top: L.vidTop, h: L.vidH };
   }
   function cutLabel(c) {
     const sa = S.seqs[c.a], sb = S.seqs[c.b];
-    return c.pod == null ? `Wycięcie ${fmt(sa)}–${fmt(sb)} · ${fmtKl(c.b - c.a)}` : `Wycięcie Podkładu ${fmt(sa)}–${fmt(sb)}`;
+    if (c.pod == null) return `Wycięcie ${fmt(sa)}–${fmt(sb)} · ${fmtKl(c.b - c.a)}`;
+    return `Wycięcie ${nakByGen(c.pod) ? 'Nakładki' : 'Podkładu'} ${fmt(sa)}–${fmt(sb)}`;
   }
 
-  // C: nowe Wycięcie w Playheadzie (na zaznaczonym Podkładzie: na nim); przy istniejącym dociąga
+  // C: nowe Wycięcie w Playheadzie (na zaznaczonym Podkładzie albo Nakładce: na nim); przy istniejącym dociąga
   // bliższą Krawędź do Playheada (prawa wyłącznie: Klatka pod Playheadem zostaje).
   function startCut() {
     if (!S.loaded || S.busy || S.exporting) return;
@@ -1072,11 +1172,14 @@
       if (i > c.a) setCutB(i); else if (i < c.a) setCutA(i);
       return;
     }
-    const sp = selPod();
+    const sp = selTrack();
     const pod = sp ? sp.gen : null;
     if (sp) {
       const s = seqOf(curTime());
-      if (s < podStart(sp) - 1e-6 || s >= podEnd(sp) - S.frameStep / 2) { showStatus('Playhead poza Podkładem', 'error', '', 3000); return; }
+      if (s < podStart(sp) - 1e-6 || s >= podEnd(sp) - S.frameStep / 2) {
+        showStatus(`Playhead poza ${sp.pos ? 'Nakładką' : 'Podkładem'}`, 'error', '', 3000);
+        return;
+      }
     } else if (S.N < 2) {
       showStatus('Sekwencja ma tylko jedną Klatkę', 'error', '', 3000);
       return;
@@ -1098,14 +1201,26 @@
     showStatus('Wycięcie porzucone', '', '', 1500);
   }
 
+  // Migawka trzyma same obiekty Podkładów i Nakładek (z ich <audio>/<video>) i ich ustawienia, więc
+  // Cofnięcie przywraca też usunięte. Dodane po migawce zostają (dodanie nie jest krokiem Cofnięcia).
   function pushUndo() {
     S.undo.push({
       parts: S.parts.map((p) => ({ ...p })),
       left: S.left, right: S.right, t: curTime(), sel: S.sel,
       zooms: S.zooms.map((z) => ({ ...z, keys: z.keys.map((q) => ({ t: q.t, k: { ...q.k } })) })),
-      pods: S.pods.map((p) => ({ gen: p.gen, at: p.at, segs: p.segs.map((s) => ({ ...s })) })),
+      pods: S.pods.map((p) => ({ p, at: p.at, segs: p.segs.map((s) => ({ ...s })) })),
+      naks: S.naks.map((n) => ({ p: n, at: n.at, segs: n.segs.map((s) => ({ ...s })), pos: { ...n.pos }, key: n.key ? [...n.key] : null })),
     });
     if (S.undo.length > UNDO_MAX) S.undo.shift();
+  }
+  function restoreTracks(snap, cur) {
+    const back = snap.map((q) => {
+      q.p.at = q.at;
+      q.p.segs = q.segs;
+      if (q.pos) { q.p.pos = q.pos; q.p.key = q.key; }
+      return q.p;
+    });
+    return [...back, ...cur.filter((p) => !snap.some((q) => q.p === p))];
   }
 
   function undo() {
@@ -1117,13 +1232,15 @@
     S.parts = u.parts;
     rebuildKept();
     S.zooms = u.zooms;
-    for (const q of u.pods) { const p = podByGen(q.gen); if (p) { p.at = q.at; p.segs = q.segs; } }
-    for (const p of S.pods) clampPod(p);
+    S.pods = restoreTracks(u.pods, S.pods);
+    S.naks = restoreTracks(u.naks, S.naks);
+    for (const p of [...S.pods, ...S.naks]) clampPod(p);
     for (const z of S.zooms) clampZoom(z);
     S.left = clamp(u.left, 0, S.N - 1);
     S.right = clamp(u.right, S.left + 1, S.N);
-    S.sel = u.sel && typeof u.sel === 'object' ? (u.sel.pod != null ? (podByGen(u.sel.pod) ? u.sel : null)
-      : (zoomById(u.sel.zoom) ? u.sel : null)) : u.sel;
+    const o = u.sel && typeof u.sel === 'object' ? u.sel : null;
+    S.sel = !o ? u.sel : o.pod != null ? (podByGen(o.pod) ? o : null) : o.nak != null ? (nakByGen(o.nak) ? o : null)
+      : (zoomById(o.zoom) ? o : null);
     S.drag = null;
     seek(u.t);
     syncParts();
@@ -1155,6 +1272,7 @@
       zooms.push({ z, za: nza, zb: nzb, keys: [...keys.entries()].sort((p, q) => p[0] - q[0]) });
     }
     const pods = S.pods.map((p) => rm(frameIndex(p.at)));
+    const naks = S.naks.map((p) => rm(frameIndex(p.at)));
     const left = rm(S.left);
     const right = S.right >= b ? S.right - n : Math.min(S.right, a);
     const play = rm(clamp(frameIndex(curTime()), 0, S.N - 1));
@@ -1179,6 +1297,7 @@
     }
     if (S.sel && typeof S.sel === 'object' && S.sel.zoom != null && !zoomById(S.sel.zoom)) S.sel = null;
     S.pods.forEach((p, k) => { p.at = frameTs(clamp(pods[k], 0, S.N - 1)); clampPod(p); });
+    S.naks.forEach((p, k) => { p.at = frameTs(clamp(naks[k], 0, S.N - 1)); clampPod(p); });
     S.left = clamp(left, 0, S.N - 1);
     S.right = clamp(right, S.left + 1, S.N);
     S.cut = null;
@@ -1195,7 +1314,7 @@
     if (!c || !S.loaded || S.busy || S.exporting) return;
     pause();
     if (c.pod != null) {
-      const p = podByGen(c.pod);
+      const p = trackByGen(c.pod);
       if (!p) { S.cut = null; return; }
       pushUndo();
       const [ua, ub] = cutPodRange(p);
@@ -1205,7 +1324,7 @@
       fitView();
       invalidateWave();
       syncPods(true);
-      showStatus(`Wycięto ${fmt(ub - ua)} z Podkładu ✓`, 'done', '', 2500);
+      showStatus(`Wycięto ${fmt(ub - ua)} z ${p.pos ? 'Nakładki' : 'Podkładu'} ✓`, 'done', '', 2500);
       return;
     }
     cutFrames(c.a, c.b, `Wycięto ${fmtKl(c.b - c.a)} ✓`);
@@ -1253,10 +1372,11 @@
           S.lastT = t;
         }
       }
-      syncPods(false);
     }
+    if (S.loaded) syncPods(false);
     draw();
     drawOverlay();
+    drawNaks();
     requestAnimationFrame(tick);
   }
 
@@ -1375,8 +1495,10 @@
     return out;
   }
 
+  // Gniazdo łapie też pasek etykiet nad wierszem Sekwencji, o ile nie leżą tam wiersze Nakładek.
+  function gniazdoTop(L) { return L.vidTop - (L.vidTop === TOP ? GRIP_H : 0); }
   function gniazdoAt(mx, my, L) {
-    if (my < L.vidTop - GRIP_H || my >= L.vidTop + L.vidH) return null;
+    if (my < gniazdoTop(L) || my >= L.vidTop + L.vidH) return null;
     const W = cssWidth();
     for (const g of gniazda()) {
       if (g.x1 < 0 || g.x0 > W) continue;
@@ -1409,8 +1531,9 @@
 
     const waveTop = L.vidTop;
     const waveH = L.vidH;
+    const rowsTop = L.rowsTop;
     const rowsBottom = L.rulerTop - (L.stripTop != null ? STRIP_H : 0);
-    const fullH = rowsBottom - waveTop;  // wiersz Sekwencji + wiersze Podkładów
+    const fullH = rowsBottom - rowsTop;  // wiersze Nakładek, Sekwencji, Zbliżeń i Podkładów
     const xl = xS(S.seqs[S.left]);
     const xr = xS(S.seqs[S.right]);
     const xe = xS(S.duration);
@@ -1418,8 +1541,8 @@
     const t = curTime();
     const xp = xOf(t);
 
-    // wiersze Zbliżeń i Podkładów: tło
-    const bgRows = L.zoomRow ? [L.zoomRow, ...L.rows] : L.rows;
+    // wiersze Nakładek, Zbliżeń i Podkładów: tło
+    const bgRows = [...L.nakRows, ...(L.zoomRow ? [L.zoomRow] : []), ...L.rows];
     for (const row of bgRows) {
       ctx.fillStyle = C.rowBg;
       ctx.fillRect(0, row.top, W, row.h);
@@ -1428,7 +1551,7 @@
     }
     // zaznaczenie (Fragment) przez wszystkie wiersze
     ctx.fillStyle = C.selection;
-    ctx.fillRect(clamp(xl, 0, W), waveTop, clamp(xr, 0, W) - clamp(xl, 0, W), fullH);
+    ctx.fillRect(clamp(xl, 0, W), rowsTop, clamp(xr, 0, W) - clamp(xl, 0, W), fullH);
     // Nagranie pod playheadem (to skasuje Delete) przy fokusie na wideo
     if (S.pieces.length > 1 && !S.sel && !S.cut) {
       const pc = S.pieces[pieceIndexAt(frameIndex(t))];
@@ -1456,7 +1579,7 @@
       const x = xS(S.seqs[pc.ia]);
       if (i > 0 && x >= 0 && x <= W) {
         ctx.fillStyle = C.styk;
-        for (let y = waveTop; y < rowsBottom; y += 6) ctx.fillRect(Math.round(x), y, 1, 3);
+        for (let y = rowsTop; y < rowsBottom; y += 6) ctx.fillRect(Math.round(x), y, 1, 3);
       }
       if (S.pieces.length > 1) {
         const x1 = xS(S.seqs[pc.ib]);
@@ -1511,6 +1634,48 @@
       }
     }
 
+    // Nakładki: zielony pasek z nazwą i szwami odcinków
+    ctx.textBaseline = 'top';
+    for (const row of L.nakRows) {
+      const n = nakByGen(row.gen);
+      if (!n) continue;
+      const s0 = podStart(n);
+      const a = xS(s0), b = xS(podEnd(n));
+      if (b < 0 || a > W) continue;
+      const ax = clamp(a, -2, W + 2), bx = clamp(b, -2, W + 2);
+      const isSel = S.sel && typeof S.sel === 'object' && S.sel.nak === n.gen;
+      ctx.fillStyle = C.nakFill;
+      roundRect(ctx, ax, row.top + 3, bx - ax, row.h - 6, 4);
+      ctx.fill();
+      let off = 0;
+      for (let k = 0; k + 1 < n.segs.length; k++) {
+        off += n.segs[k].tout - n.segs[k].tin;
+        const x = xS(s0 + off);
+        if (x < 0 || x > W) continue;
+        ctx.fillStyle = C.seam;
+        for (let y = row.top + 4; y < row.top + row.h - 4; y += 5) ctx.fillRect(Math.round(x), y, 1, 3);
+      }
+      ctx.lineWidth = isSel && !S.sel.edge ? 2 : 1;
+      ctx.strokeStyle = isSel && !S.sel.edge ? C.handleSel : C.nakBorder;
+      roundRect(ctx, ax + 0.5, row.top + 3.5, bx - ax - 1, row.h - 7, 4);
+      ctx.stroke();
+      if (isSel && S.sel.edge) {
+        ctx.fillStyle = C.handleSel;
+        ctx.fillRect(Math.round(S.sel.edge === 'in' ? a : b) - 1, row.top + 2, 3, row.h - 4);
+      }
+      ctx.fillStyle = C.text;
+      ctx.font = '10px "Segoe UI", system-ui, sans-serif';  // etykieta Głośności wiersza wyżej zostawia swój font i 'right'
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(ax + 2, row.top, Math.max(0, bx - ax - 4), row.h);
+      ctx.clip();
+      ctx.fillText(n.gain < 1 ? `${n.name} · ${Math.round(n.gain * 100)} %` : n.name, ax + 6, row.top + 9);
+      ctx.restore();
+      if (S.volLabel && S.volLabel.pod === n.gen && now < S.volLabel.until) drawVolLabel(S.volLabel.text, W, row.top + 4);
+    }
+
     // Podkłady
     ctx.textBaseline = 'top';
     for (const row of L.rows) {
@@ -1545,6 +1710,9 @@
         ctx.fillRect(Math.round(ex) - 1, row.top + 2, 3, row.h - 4);
       }
       ctx.fillStyle = C.text;
+      ctx.font = '10px "Segoe UI", system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
       ctx.save();
       ctx.beginPath();
       ctx.rect(ax + 2, row.top, Math.max(0, bx - ax - 4), row.h);
@@ -1559,8 +1727,8 @@
 
     // przyciemnienie poza Fragmentem: wszystkie wiersze
     ctx.fillStyle = C.outside;
-    if (xl > 0) ctx.fillRect(0, waveTop, clamp(xl, 0, W), fullH);
-    if (xr < W) ctx.fillRect(clamp(xr, 0, W), waveTop, W - clamp(xr, 0, W), fullH);
+    if (xl > 0) ctx.fillRect(0, rowsTop, clamp(xl, 0, W), fullH);
+    if (xr < W) ctx.fillRect(clamp(xr, 0, W), rowsTop, W - clamp(xr, 0, W), fullH);
 
     // Wycięcie: czerwony pas z dwiema Krawędziami w wierszu celu (Sekwencja albo Podkład)
     if (S.cut) {
@@ -1592,7 +1760,7 @@
       if (S.dragOver[S.kind === 'video' ? 'mp4' : 'mp3']) {
         for (const g of gniazda()) {
           if (g.x1 < 0 || g.x0 > W) continue;
-          const hot = my >= waveTop - GRIP_H && my < waveTop + waveH && mx >= g.x0 && mx <= g.x1;
+          const hot = my >= gniazdoTop(L) && my < waveTop + waveH && mx >= g.x0 && mx <= g.x1;
           ctx.fillStyle = hot ? C.gniazdoHot : C.gniazdo;
           roundRect(ctx, g.x0, waveTop + 2, GN_W, waveH - 4, 4);
           ctx.fill();
@@ -1612,6 +1780,23 @@
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(S.kind === 'video' ? 'Podkład' : 'Podkłady działają tylko pod wideo', W / 2, L.stripTop + STRIP_H / 2);
+      }
+      if (L.nakStripTop != null) {
+        const hot = my >= L.nakStripTop && my < L.nakStripTop + STRIP_H;
+        ctx.fillStyle = hot ? 'rgba(62,207,106,0.4)' : C.gniazdo;
+        roundRect(ctx, 2, L.nakStripTop + 2, W - 4, STRIP_H - 4, 4);
+        ctx.fill();
+        ctx.strokeStyle = C.gniazdoBorder;
+        ctx.stroke();
+        ctx.fillStyle = C.text;
+        ctx.font = '11px "Segoe UI", system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('Nakładka (greenscreen)', W / 2, L.nakStripTop + STRIP_H / 2);
+        if (hot && mx >= 0 && mx <= W) {
+          ctx.fillStyle = C.nak;
+          ctx.fillRect(Math.round(xS(nakDropS(mx))) - 1, L.nakStripTop + 2, 2, STRIP_H - 4);
+        }
       }
       ctx.setLineDash([]);
     }
@@ -1671,11 +1856,11 @@
       const x = (xS(S.seqs[c.a]) + xS(S.seqs[c.b])) / 2;
       labels.push({ x, text: cutLabel(c), col: C.cutBorder, prio: 2 });
     }
-    const sp = selPod();
+    const sp = selTrack();
     if (sp) {
       const edge = S.sel.edge;
       const tt = edge === 'out' ? podEnd(sp) : podStart(sp);
-      const what = edge === 'in' ? 'początek' : edge === 'out' ? 'koniec' : 'Podkład';
+      const what = edge === 'in' ? 'początek' : edge === 'out' ? 'koniec' : trackWord(sp);
       labels.push({ x: xS(tt), text: `${what} ${fmt(tt)}`, col: C.handleSel, prio: 1 });
     }
     const sz = selZoom();
@@ -1780,8 +1965,19 @@
     return null;
   }
 
+  // Pasek ścieżki (Podkład albo Nakładka) w wierszu: Krawędź, środek albo nic.
+  function hitTrackRow(p, mx) {
+    const a = xS(podStart(p)), b = xS(podEnd(p));
+    const dA = Math.abs(mx - a), dB = Math.abs(mx - b);
+    if (dA <= HIT || dB <= HIT) {
+      if (dA <= HIT && dB <= HIT) return mx < (a + b) / 2 ? 'in' : 'out';
+      return dA <= HIT ? 'in' : 'out';
+    }
+    return mx >= a && mx <= b ? null : undefined;
+  }
+
   // Co jest pod kursorem: {kind:'cut', edge} | {kind:'handle', which} | {kind:'pod', gen, edge}
-  // | {kind:'zoom', id, part} | {kind:'video'}
+  // | {kind:'nak', gen, edge} | {kind:'zoom', id, part} | {kind:'video'}
   function hitTest(mx, my) {
     const L = layout(stripWanted());
     if (S.cut) {
@@ -1790,6 +1986,13 @@
         const dA = Math.abs(mx - xS(S.seqs[S.cut.a])), dB = Math.abs(mx - xS(S.seqs[S.cut.b]));
         if (dA <= HIT || dB <= HIT) return { kind: 'cut', edge: dA <= dB ? 'a' : 'b' };
       }
+    }
+    for (const row of L.nakRows) {
+      if (my < row.top || my >= row.top + row.h) continue;
+      const n = nakByGen(row.gen);
+      const edge = n ? hitTrackRow(n, mx) : undefined;
+      if (edge !== undefined) return { kind: 'nak', gen: n.gen, edge };
+      break;
     }
     if (my < L.vidTop + L.vidH) {
       const h = hitHandle(mx);
@@ -1846,10 +2049,16 @@
     else { setCutB(endIndexAtS(s)); seekFrame(Math.min(c.b, S.N - 1)); }
   }
 
+  // Punkt zdarzenia w px CSS timeline'u (z clientX, patrz ovPoint).
+  function tlPoint(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
   canvas.addEventListener('pointerdown', (e) => {
     if (!S.loaded || e.button !== 0) return;
     try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* syntetyczne zdarzenia */ }
-    const mx = e.offsetX, my = e.offsetY;
+    const { x: mx, y: my } = tlPoint(e);
     const h = hitTest(mx, my);
     if (h.kind === 'cut') {
       pause();
@@ -1864,10 +2073,10 @@
       // przy Wycięciu zaznaczenie stoi (cel Wycięcia jest stały): klik tylko ustawia Playhead
       S.drag = { kind: 'scrub' };
       seek(tOf(mx));
-    } else if (h.kind === 'pod') {
+    } else if (h.kind === 'pod' || h.kind === 'nak') {
       pause();
-      const p = podByGen(h.gen);
-      S.sel = { pod: h.gen, edge: h.edge };
+      const p = trackByGen(h.gen);
+      S.sel = h.kind === 'pod' ? { pod: h.gen, edge: h.edge } : { nak: h.gen, edge: h.edge };
       S.drag = { kind: 'pod', gen: h.gen, edge: h.edge, grab: sOf(mx) - podStart(p) };
     } else if (h.kind === 'zoom') {
       pause();
@@ -1882,7 +2091,7 @@
   });
 
   canvas.addEventListener('pointermove', (e) => {
-    const mx = e.offsetX, my = e.offsetY;
+    const { x: mx, y: my } = tlPoint(e);
     S.hoverX = mx;
     S.hoverT = S.loaded ? clamp(sOf(mx), 0, extent()) : null;
     if (!S.loaded) return;
@@ -1892,7 +2101,7 @@
       } else if (S.drag.kind === 'cut') {
         dragCutTo(mx, e.ctrlKey);
       } else if (S.drag.kind === 'pod') {
-        const p = podByGen(S.drag.gen);
+        const p = trackByGen(S.drag.gen);
         if (p) {
           const doSnap = !e.ctrlKey;
           if (S.drag.edge === 'in') setPodIn(p, sOf(mx), doSnap);
@@ -1916,8 +2125,9 @@
       canvas.style.cursor = 'grabbing';
     } else {
       const h = hitTest(mx, my);
-      canvas.style.cursor = h.kind === 'cut' || h.kind === 'handle' || (h.kind === 'pod' && h.edge) || (h.kind === 'zoom' && h.part) ? 'ew-resize'
-        : (h.kind === 'pod' || h.kind === 'zoom') && !S.cut ? 'grab' : 'default';
+      const track = h.kind === 'pod' || h.kind === 'nak';
+      canvas.style.cursor = h.kind === 'cut' || h.kind === 'handle' || (track && h.edge) || (h.kind === 'zoom' && h.part) ? 'ew-resize'
+        : (track || h.kind === 'zoom') && !S.cut ? 'grab' : 'default';
     }
   });
 
@@ -1954,14 +2164,14 @@
       const minSpan = Math.min(ext, Math.max(20 * S.frameStep, 0.2));
       const f = Math.pow(1.18, -delta / 100);
       const newSpan = clamp(span / f, minSpan, ext);
-      const s = sOf(e.offsetX);
+      const s = sOf(tlPoint(e).x);
       let start = s - (s - v.start) * (newSpan / span);
       start = clamp(start, 0, ext - newSpan);
       S.view = { start, end: start + newSpan };
       S.viewFull = newSpan >= ext - 1e-9;
     }
     invalidateWave();
-    S.hoverT = clamp(sOf(e.offsetX), 0, ext);
+    S.hoverT = clamp(sOf(tlPoint(e).x), 0, ext);
   }, { passive: false });
 
   window.addEventListener('resize', () => invalidateWave());
@@ -1991,7 +2201,7 @@
   // Przy Wycięciu strzałki ruszają Playhead (żeby dojechać do Krawędzi i dociągnąć ją C) albo Suwak.
   function stepBy(dir, big) {
     if (!S.loaded) return;
-    const sp = S.cut ? null : selPod();
+    const sp = S.cut ? null : selTrack();
     if (sp) { stepPod(sp, S.sel.edge, dir, big); return; }
     if (S.sel === 'left' || S.sel === 'right') {
       const i = stepIndex(handleIndex(S.sel), dir, big);
@@ -2014,7 +2224,7 @@
   function volBy(dir, fine) {
     if (!S.loaded || S.kind !== 'video' || selZoom()) return;
     if (blockedByCut()) return;
-    const sp = selPod();
+    const sp = selTrack();
     setGain(sp || S, dir, fine);
   }
 
@@ -2029,8 +2239,8 @@
       else removeZoom(sz.id);
       return;
     }
-    const sp = selPod();
-    if (sp) { removePod(sp.gen); return; }
+    const sp = selTrack();
+    if (sp) { cancelPreviewDrag(); removeTrack(sp.gen); return; }
     if (S.sel) return;  // zaznaczony Suwak: Delete nic nie robi
     // Nagranie pod Playheadem: to Wycięcie pokrywające całe Nagranie (Ctrl+Z cofa)
     if (S.pieces.length < 2) { showStatus('Ostatniego Nagrania nie da się usunąć', 'error', '', 3000); return; }
@@ -2107,6 +2317,12 @@
       case 'KeyC':
         if (!e.repeat) startCut();
         break;
+      case 'KeyG':
+        if (e.repeat) break;
+        if (blockedByCut()) break;
+        if (!selNak()) { showStatus('Zaznacz Nakładkę na timeline, potem G + klik w jej tło wybiera kolor klucza', 'error', '', 3500); break; }
+        S.gKey = true;
+        break;
       case 'Delete':
       case 'Backspace':
         e.preventDefault();
@@ -2114,7 +2330,7 @@
         break;
       case 'Home': {
         e.preventDefault();
-        const sp = S.cut ? null : selPod();
+        const sp = S.cut ? null : selTrack();
         if (sp) { movePodTo(sp, 0, false); fitView(); ensureVisible(podStart(sp)); }
         else if (S.sel === 'left' || S.sel === 'right') moveHandleTo(S.sel, 0);
         else { pause(); seekFrame(0); }
@@ -2122,7 +2338,7 @@
       }
       case 'End': {
         e.preventDefault();
-        const sp = S.cut ? null : selPod();
+        const sp = S.cut ? null : selTrack();
         if (sp) { movePodTo(sp, Math.max(0, S.duration - podLen(sp)), false); fitView(); ensureVisible(podEnd(sp)); }
         else if (S.sel === 'left' || S.sel === 'right') moveHandleTo(S.sel, S.N);
         else { pause(); seekFrame(S.N - 1); }
@@ -2133,10 +2349,11 @@
   window.addEventListener('keyup', (e) => {
     if (e.code.startsWith('Arrow')) stopRepeat();
     if (e.code === 'KeyZ') S.zKey = false;
+    if (e.code === 'KeyG') S.gKey = false;
   });
-  window.addEventListener('blur', () => { stopRepeat(); S.zKey = false; });
+  window.addEventListener('blur', () => { stopRepeat(); S.zKey = false; S.gKey = false; });
 
-  // ---------- podgląd: Kadry (nakładka nad wideo) ----------
+  // ---------- podgląd: Kadry (warstwa #ov nad wideo) ----------
   // Na pauzie widać cały obraz z obrysami Kadrów A i B Zbliżenia pod Playheadem (albo Kadru A
   // otwartego procesu); w trakcie odtwarzania wideo dostaje transform i wygląda jak w wyniku.
   function videoRect() {
@@ -2215,19 +2432,169 @@
     return inside ? { kind: 'move', v: inside } : null;
   }
 
+  // ---------- podgląd: Nakładki ----------
+  // Położenie Nakładki w px podglądu: środek, rozmiar (proporcje Nakładki) i obrót zgodnie z ruchem wskazówek
+  // zegara (oś y w dół, tak samo jak `rotate` w ffmpeg). `local`/`world` przeliczają punkt do układu Nakładki.
+  function nakGeom(n, R, pos) {
+    const q = pos || n.pos;
+    const w = q.s * R.w, h = w * n.height / n.width;
+    const a = q.r * Math.PI / 180;
+    return { cx: R.x + q.x * R.w, cy: R.y + q.y * R.h, w, h, cos: Math.cos(a), sin: Math.sin(a) };
+  }
+  function nakLocal(g, px, py) {
+    const dx = px - g.cx, dy = py - g.cy;
+    return { x: dx * g.cos + dy * g.sin, y: -dx * g.sin + dy * g.cos };
+  }
+  function nakWorld(g, lx, ly) { return { x: g.cx + lx * g.cos - ly * g.sin, y: g.cy + lx * g.sin + ly * g.cos }; }
+  function nakCorners(g) {
+    const hw = g.w / 2, hh = g.h / 2;
+    return [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => ({ sx, sy, ...nakWorld(g, sx * hw, sy * hh) }));
+  }
+  function normDeg(r) { return ((r + 180) % 360 + 360) % 360 - 180; }
+  function visibleNaks() { return S.loaded && S.kind === 'video' ? S.naks.filter((n) => n.ready && n.want != null) : []; }
+
+  // Co jest pod kursorem na podglądzie: najwyższa widoczna Nakładka; róg = skalowanie, pas wewnątrz
+  // przy rogu = obrót, reszta wnętrza = przesuwanie. Liczy się prostokąt, nie piksele po kluczu.
+  function hitNak(px, py) {
+    const R = videoRect();
+    const vis = visibleNaks();
+    for (let k = vis.length - 1; k >= 0; k--) {
+      const n = vis[k];
+      const g = nakGeom(n, R);
+      const l = nakLocal(g, px, py);
+      const hw = g.w / 2, hh = g.h / 2;
+      const inside = Math.abs(l.x) <= hw && Math.abs(l.y) <= hh;
+      let best = null, bestD = Infinity;
+      for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
+        const d = Math.hypot(l.x - sx * hw, l.y - sy * hh);
+        if (d < bestD) { bestD = d; best = { sx, sy }; }
+      }
+      const corner = Math.min(NAK_CORNER, Math.min(g.w, g.h) * 0.25);
+      if (bestD <= corner) return { n, kind: 'resize', ...best };
+      if (!inside) continue;
+      if (bestD <= Math.min(NAK_ROT, Math.min(g.w, g.h) * 0.45)) return { n, kind: 'rotate', ...best };
+      return { n, kind: 'move' };
+    }
+    return null;
+  }
+
+  // Przeciąganie: środek przesuwa (środek zostaje w obrazie), róg skaluje z przeciwległym rogiem w miejscu,
+  // obrót wokół środka z Przyciąganiem do 0/90/180/270° (±3°, Ctrl wyłącza), Shift co 15°.
+  function dragNak(d, px, py, shift, ctrl) {
+    const n = d.n, R = videoRect(), p0 = d.pos0;
+    const g0 = nakGeom(n, R, p0);
+    if (d.mode === 'move') {
+      n.pos.x = clamp(p0.x + (px - d.px0) / R.w, 0, 1);
+      n.pos.y = clamp(p0.y + (py - d.py0) / R.h, 0, 1);
+    } else if (d.mode === 'rotate') {
+      const a0 = Math.atan2(d.py0 - g0.cy, d.px0 - g0.cx), a1 = Math.atan2(py - g0.cy, px - g0.cx);
+      let r = p0.r + (a1 - a0) * 180 / Math.PI;
+      if (shift) r = Math.round(r / 15) * 15;
+      else if (!ctrl) { const q = Math.round(r / 90) * 90; if (Math.abs(r - q) <= 3) r = q; }
+      n.pos.r = normDeg(r);
+    } else {
+      const O = nakWorld(g0, -d.sx * g0.w / 2, -d.sy * g0.h / 2);
+      const dx = px - O.x, dy = py - O.y;
+      const lx = dx * g0.cos + dy * g0.sin, ly = -dx * g0.sin + dy * g0.cos;
+      const asp = n.width / n.height;
+      const w = clamp(Math.max(d.sx * lx, d.sy * ly * asp), NAK_MIN * R.w, NAK_MAX * R.w), h = w / asp;
+      const c = { x: O.x + (d.sx * w / 2) * g0.cos - (d.sy * h / 2) * g0.sin, y: O.y + (d.sx * w / 2) * g0.sin + (d.sy * h / 2) * g0.cos };
+      n.pos.s = w / R.w;
+      n.pos.x = clamp((c.x - R.x) / R.w, 0, 1);
+      n.pos.y = clamp((c.y - R.y) / R.h, 0, 1);
+    }
+  }
+
+  // Kursory: pipeta (G), półkole ze strzałką (obrót), strzałka skalowania wzdłuż obróconej przekątnej.
+  const svgCursor = (svg, x, y, fb) => `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${x} ${y}, ${fb}`;
+  const CUR_PIPETTE = svgCursor('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">'
+    + '<path d="M3 21l1.5-4.5L14 7l3 3-9.5 9.5z" fill="#fff" stroke="#000" stroke-width="1.5" stroke-linejoin="round"/>'
+    + '<path d="M13 5l2-2 6 6-2 2z" fill="#3ecf6a" stroke="#000" stroke-width="1.5" stroke-linejoin="round"/></svg>', 3, 21, 'crosshair');
+  const CUR_ROTATE = svgCursor('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">'
+    + '<path d="M5 14a7 7 0 1 1 14 0" fill="none" stroke="#000" stroke-width="4"/>'
+    + '<path d="M5 14a7 7 0 1 1 14 0" fill="none" stroke="#fff" stroke-width="2"/>'
+    + '<path d="M15.5 13.5l3.5 3.5 3.5-3.5z" fill="#fff" stroke="#000" stroke-width="1"/></svg>', 12, 12, 'alias');
+  function resizeCursor(g, sx, sy) {
+    const deg = ((Math.atan2(sy * g.h, sx * g.w) + Math.atan2(g.sin, g.cos)) * 180 / Math.PI % 180 + 180) % 180;
+    return ['ew-resize', 'nwse-resize', 'ns-resize', 'nesw-resize'][Math.round(deg / 45) % 4];
+  }
+
+  const sampler = document.createElement('canvas');
+  function frameData(n, x, y, w, h) {
+    const v = n.audio, vw = v.videoWidth, vh = v.videoHeight;
+    if (!vw || !vh) return null;
+    if (sampler.width !== vw || sampler.height !== vh) { sampler.width = vw; sampler.height = vh; }
+    const g = sampler.getContext('2d', { willReadFrequently: true });
+    g.drawImage(v, 0, 0, vw, vh);
+    return g.getImageData(clamp(x, 0, vw - w), clamp(y, 0, vh - h), w, h).data;
+  }
+  function avgRGB(data) {
+    const sum = [0, 0, 0];
+    for (let i = 0; i < data.length; i += 4) { sum[0] += data[i]; sum[1] += data[i + 1]; sum[2] += data[i + 2]; }
+    const k = data.length / 4;
+    return sum.map((v) => Math.round(v / k));
+  }
+  const hexRGB = (c) => '#' + c.map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase();
+  // Kolor klucza z narożników pierwszej Klatki (łaty 8x8): średnia tych, w których dominuje zieleń.
+  function autoKey(n) {
+    try {
+      const v = n.audio, vw = v.videoWidth, vh = v.videoHeight;
+      const greens = [];
+      for (const [x, y] of [[2, 2], [vw - 10, 2], [2, vh - 10], [vw - 10, vh - 10]]) {
+        const d = frameData(n, x, y, 8, 8);
+        if (!d) continue;
+        const c = avgRGB(d);
+        if (c[1] > c[0] + 30 && c[1] > c[2] + 30) greens.push(c);
+      }
+      if (greens.length) return [0, 1, 2].map((i) => Math.round(greens.reduce((a, c) => a + c[i], 0) / greens.length));
+    } catch (e) { /* brak klatki */ }
+    showStatus(`Nakładka ${n.name}: nie widać zielonego tła w narożnikach, wybierz kolor: G + klik`, 'error', '', 5000);
+    return [...KEY_DEFAULT];
+  }
+  // G + klik: średnia 5x5 px z klatki źródłowej zaznaczonej Nakładki pod kursorem.
+  function pickKey(px, py) {
+    const n = selNak();
+    if (!n || n.want == null || !n.ready) { showStatus('Zaznaczonej Nakładki nie ma w tej Klatce', 'error', '', 2500); return; }
+    const g = nakGeom(n, videoRect());
+    const l = nakLocal(g, px, py);
+    if (Math.abs(l.x) > g.w / 2 || Math.abs(l.y) > g.h / 2) return;
+    const v = n.audio;
+    const sx = Math.floor((l.x / g.w + 0.5) * v.videoWidth), sy = Math.floor((l.y / g.h + 0.5) * v.videoHeight);
+    const d = frameData(n, sx - 2, sy - 2, 5, 5);
+    if (!d) return;
+    n.key = avgRGB(d);
+    showStatus(`Kolor klucza ${hexRGB(n.key)} ✓`, 'done', '', 2000);
+  }
+
+  // Punkt zdarzenia w px CSS podglądu. Z clientX, nie z offsetX: syntetyczne zdarzenia testów dostają
+  // w Chromium offsetX podzielony przez devicePixelRatio, prawdziwa mysz nie; clientX jest poprawny w obu.
+  function ovPoint(e) {
+    const r = ov.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
   ov.addEventListener('pointerdown', (e) => {
     if (!S.loaded || S.kind !== 'video' || e.button !== 0) return;
+    const { x: ex, y: ey } = ovPoint(e);
     if (S.cut) { blockedByCut(); return; }
     const R = videoRect();
-    const p = normPt(e.offsetX, e.offsetY, R);
+    const p = normPt(ex, ey, R);
     if (S.zKey) {
       pause();
       try { ov.setPointerCapture(e.pointerId); } catch (err) { /* syntetyczne zdarzenia */ }
-      S.pdrag = { kind: 'draw', p0: p, px0: e.offsetX, py0: e.offsetY, kadr: null, moved: false };
+      S.pdrag = { kind: 'draw', p0: p, px0: ex, py0: ey, kadr: null, moved: false };
       return;
     }
     if (isPlaying()) return;
-    const h = hitKadr(e.offsetX, e.offsetY);
+    if (S.gKey) { pickKey(ex, ey); return; }
+    const hn = hitNak(ex, ey);
+    if (hn) {
+      try { ov.setPointerCapture(e.pointerId); } catch (err) { /* */ }
+      S.sel = { nak: hn.n.gen, edge: null };
+      S.pdrag = { kind: 'nak', mode: hn.kind, n: hn.n, pos0: { ...hn.n.pos }, px0: ex, py0: ey, sx: hn.sx, sy: hn.sy };
+      return;
+    }
+    const h = hitKadr(ex, ey);
     if (!h) return;
     try { ov.setPointerCapture(e.pointerId); } catch (err) { /* */ }
     if (h.kind === 'move') S.pdrag = { kind: 'move', target: h.v.target, k0: { ...h.v.k }, grab: { x: p.x - h.v.k.x, y: p.y - h.v.k.y } };
@@ -2235,13 +2602,18 @@
   });
   ov.addEventListener('pointermove', (e) => {
     if (!S.loaded || S.kind !== 'video') return;
+    const { x: ex, y: ey } = ovPoint(e);
     const R = videoRect();
-    const p = normPt(e.offsetX, e.offsetY, R);
+    const p = normPt(ex, ey, R);
     const d = S.pdrag;
     if (d) {
       if (d.kind === 'draw') {
-        if (Math.hypot(e.offsetX - d.px0, e.offsetY - d.py0) >= 4) d.moved = true;
+        if (Math.hypot(ex - d.px0, ey - d.py0) >= 4) d.moved = true;
         if (d.moved) d.kadr = kadrFromDrag(d.p0, p);
+      } else if (d.kind === 'nak') {
+        dragNak(d, ex, ey, e.shiftKey, e.ctrlKey);
+        ov.style.cursor = d.mode === 'rotate' ? CUR_ROTATE : d.mode === 'resize' ? resizeCursor(nakGeom(d.n, R), d.sx, d.sy) : 'grabbing';
+        return;
       } else if (d.kind === 'move') {
         applyKadr(d.target, { x: p.x - d.grab.x, y: p.y - d.grab.y, s: d.k0.s });
       } else {
@@ -2251,7 +2623,13 @@
       return;
     }
     if (S.zKey) { ov.style.cursor = 'crosshair'; return; }
-    const h = isPlaying() || S.cut ? null : hitKadr(e.offsetX, e.offsetY);
+    if (S.gKey) { ov.style.cursor = CUR_PIPETTE; return; }
+    const hn = isPlaying() || S.cut ? null : hitNak(ex, ey);
+    if (hn) {
+      ov.style.cursor = hn.kind === 'move' ? 'move' : hn.kind === 'rotate' ? CUR_ROTATE : resizeCursor(nakGeom(hn.n, R), hn.sx, hn.sy);
+      return;
+    }
+    const h = isPlaying() || S.cut ? null : hitKadr(ex, ey);
     ov.style.cursor = !h ? 'default' : h.kind === 'move' ? 'move'
       : (h.corner === 'nw' || h.corner === 'se') ? 'nwse-resize' : 'nesw-resize';
   });
@@ -2304,8 +2682,10 @@
       const f = 1 / k.s;
       const tx = R.x - (R.x + k.x * R.w) * f, ty = R.y - (R.y + k.y * R.h) * f;
       video.style.transform = `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px) scale(${f.toFixed(4)})`;
+      nk.style.transform = video.style.transform;  // Zbliżenie powiększa też Nakładki (ADR 0003)
     } else if (video.style.transform) {
       video.style.transform = '';
+      nk.style.transform = '';
     }
     if (!S.loaded || S.kind !== 'video' || playing) return;
     const R = videoRect();
@@ -2319,6 +2699,149 @@
       if (kn && !vis.some((v) => sameKadr(v.k, kn))) drawKadr(kadrPx(kn, R), '', C.kadrNow, true, false);
     }
     if (S.pdrag && S.pdrag.kind === 'draw' && S.pdrag.kadr) drawKadr(kadrPx(S.pdrag.kadr, R), '', C.kadr, false, true);
+    // ramka zaznaczonej Nakładki z rogami (przy G bez ramki: widać surowe tło do wybrania koloru)
+    const sn = selNak();
+    if (sn && sn.ready && sn.want != null && !S.gKey) {
+      const g = nakGeom(sn, R);
+      const cs = nakCorners(g);
+      octx.setLineDash([]);
+      octx.lineWidth = 2;
+      octx.strokeStyle = C.nak;
+      octx.beginPath();
+      cs.forEach((c, i) => (i ? octx.lineTo(c.x, c.y) : octx.moveTo(c.x, c.y)));
+      octx.closePath();
+      octx.stroke();
+      octx.fillStyle = C.nak;
+      for (const c of cs) octx.fillRect(Math.round(c.x) - CORNER / 2, Math.round(c.y) - CORNER / 2, CORNER, CORNER);
+      const d = S.pdrag;
+      if (d && d.kind === 'nak' && d.n === sn && d.mode === 'rotate') {
+        const tag = `${Math.round(sn.pos.r)}°`;
+        octx.font = '12px "Segoe UI", system-ui, sans-serif';
+        octx.textBaseline = 'top';
+        octx.textAlign = 'left';
+        const tw = octx.measureText(tag).width + 10;
+        octx.fillStyle = C.nak;
+        octx.fillRect(g.cx - tw / 2, g.cy - 9, tw, 18);
+        octx.fillStyle = '#111';
+        octx.fillText(tag, g.cx - tw / 2 + 5, g.cy - 7);
+      }
+    }
+  }
+
+  // Obraz Nakładek: WebGL na płótnie #nk nad <video>, z tym samym transformem w trakcie Zbliżenia.
+  // Shader liczy klucz jak ffmpeg (ciach.py nak_filters): chrominancja z RGB macierzą i zakresem Nakładki,
+  // odległość od klucza jak w `chromakey` (średnia z 3x3 próbek co 2 piksele, czyli próbek chrominancji
+  // 4:2:0), alfa = (odległość − KEY_SIM) / KEY_BLEND, potem `despill` (g = min(g, (r + b) / 2)).
+  const NAK_VS = `attribute vec2 aPos; attribute vec2 aUV; varying vec2 vUV;
+    void main() { vUV = aUV; gl_Position = vec4(aPos, 0.0, 1.0); }`;
+  const NAK_FS = `precision highp float;
+    varying vec2 vUV;
+    uniform sampler2D uTex; uniform vec2 uStep; uniform vec2 uKey; uniform float uSim; uniform float uBlend;
+    uniform float uScale; uniform float uOn; uniform vec3 uCu; uniform vec3 uCv;
+    float dist(vec2 p) {
+      vec3 c = texture2D(uTex, p).rgb;
+      vec2 q = vec2(128.0 + uScale * dot(uCu, c), 128.0 + uScale * dot(uCv, c)) - uKey;
+      return sqrt(dot(q, q) / 130050.0);
+    }
+    void main() {
+      vec3 c = texture2D(uTex, vUV).rgb;
+      float a = 1.0;
+      if (uOn > 0.5) {
+        float d = 0.0;
+        for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++) d += dist(vUV + vec2(float(i), float(j)) * uStep);
+        d /= 9.0;
+        a = clamp((d - uSim) / uBlend, 0.0, 1.0);
+        c.g = min(c.g, 0.5 * (c.r + c.b));
+      }
+      gl_FragColor = vec4(c * a, a);
+    }`;
+  let gl = null, glP = null, glBuf = null;
+  const glU = {};
+  function initGL() {
+    gl = nk.getContext('webgl', { premultipliedAlpha: true, alpha: true, antialias: false });
+    if (!gl) return false;
+    const sh = (type, src) => { const o = gl.createShader(type); gl.shaderSource(o, src); gl.compileShader(o); return o; };
+    glP = gl.createProgram();
+    gl.attachShader(glP, sh(gl.VERTEX_SHADER, NAK_VS));
+    gl.attachShader(glP, sh(gl.FRAGMENT_SHADER, NAK_FS));
+    gl.linkProgram(glP);
+    if (!gl.getProgramParameter(glP, gl.LINK_STATUS)) { gl = null; return false; }
+    gl.useProgram(glP);
+    for (const u of ['uTex', 'uStep', 'uKey', 'uSim', 'uBlend', 'uScale', 'uOn', 'uCu', 'uCv']) glU[u] = gl.getUniformLocation(glP, u);
+    glBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, glBuf);
+    const aPos = gl.getAttribLocation(glP, 'aPos'), aUV = gl.getAttribLocation(glP, 'aUV');
+    gl.enableVertexAttribArray(aPos);
+    gl.enableVertexAttribArray(aUV);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 16, 0);
+    gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 16, 8);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.uniform1i(glU.uTex, 0);
+    gl.uniform1f(glU.uSim, KEY_SIM);
+    gl.uniform1f(glU.uBlend, KEY_BLEND);
+    return true;
+  }
+  // Klucz jako U, V pliku Nakładki, zaokrąglone jak w ciach.py key_yuv.
+  function keyUV(n) {
+    const m = MATRIX[n.matrix], sc = n.fullRange ? 255 : 224;
+    const c = (n.key || KEY_DEFAULT).map((v) => v / 255);
+    const dot = (k) => k[0] * c[0] + k[1] * c[1] + k[2] * c[2];
+    return [clamp(Math.round(128 + sc * dot(m.u)), 0, 255), clamp(Math.round(128 + sc * dot(m.v)), 0, 255)];
+  }
+  function drawNaks() {
+    const vis = visibleNaks();
+    if (!vis.length && !gl) return;
+    const dpr = window.devicePixelRatio || 1;
+    const pw = previewEl.clientWidth || 1, ph = previewEl.clientHeight || 1;
+    const cw = Math.round(pw * dpr), ch = Math.round(ph * dpr);
+    if (nk.width !== cw || nk.height !== ch) { nk.width = cw; nk.height = ch; }
+    if (!gl && !initGL()) return;
+    gl.viewport(0, 0, cw, ch);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    if (!vis.length) return;
+    const R = videoRect();
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(Math.round(R.x * dpr), Math.round(ch - (R.y + R.h) * dpr), Math.round(R.w * dpr), Math.round(R.h * dpr));
+    const raw = S.gKey ? selNak() : null;
+    for (const n of vis) {
+      const v = n.audio;
+      if (v.readyState < 2 || !v.videoWidth) continue;
+      if (!n.tex) {
+        n.tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, n.tex);
+        for (const [k, val] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR],
+          [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, val);
+      }
+      gl.bindTexture(gl.TEXTURE_2D, n.tex);
+      try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, v); } catch (e) { continue; }
+      const cs = nakCorners(nakGeom(n, R));
+      const uv = [[0, 0], [1, 0], [1, 1], [0, 1]];
+      const data = [];
+      for (const i of [0, 1, 3, 2]) data.push(cs[i].x * dpr / cw * 2 - 1, 1 - cs[i].y * dpr / ch * 2, uv[i][0], uv[i][1]);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.DYNAMIC_DRAW);
+      const m = MATRIX[n.matrix];
+      const [ku, kv] = keyUV(n);
+      gl.uniform2f(glU.uStep, 2 / v.videoWidth, 2 / v.videoHeight);
+      gl.uniform2f(glU.uKey, ku, kv);
+      gl.uniform1f(glU.uScale, n.fullRange ? 255 : 224);
+      gl.uniform1f(glU.uOn, n === raw ? 0 : 1);
+      gl.uniform3f(glU.uCu, m.u[0], m.u[1], m.u[2]);
+      gl.uniform3f(glU.uCv, m.v[0], m.v[1], m.v[2]);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+  }
+
+  // Test: piksel płótna Nakładek (RGBA, alfa przemnożona) w punkcie podglądu, czytany zaraz po narysowaniu.
+  function nakPixel(px, py) {
+    drawNaks();
+    if (!gl) return [0, 0, 0, 0];  // płótno jeszcze nic nie narysowało
+    const dpr = window.devicePixelRatio || 1;
+    const b = new Uint8Array(4);
+    gl.readPixels(Math.round(px * dpr), nk.height - 1 - Math.round(py * dpr), 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, b);
+    return Array.from(b);
   }
 
   // ---------- drag & drop ----------
@@ -2375,7 +2898,7 @@
     dragDepth = 0;
     // Zdjęcie geometrii z chwili upuszczenia: po zniknięciu paska Gniazda canvas się kurczy,
     // a zdarzenie `dropped` z Pythona przychodzi chwilę później.
-    S.lastDrop = { x: e.clientX, y: e.clientY, t: performance.now(),
+    S.lastDrop = { x: e.clientX, y: e.clientY, t: performance.now(), strips: stripWanted(),
       canvas: canvas.getBoundingClientRect(), preview: previewEl.getBoundingClientRect() };
     S.dragOver = null;
     document.body.classList.remove('dragover');
@@ -2396,7 +2919,7 @@
     const mx = x - rect.left, my = y - rect.top;
     if (mx < 0 || mx > rect.width) return 'none';
     if (S.busy || S.exporting) { showStatus('Poczekaj na zakończenie bieżącej operacji', 'error', '', 3000); return 'busy'; }
-    const L = layout(true);
+    const L = layout(snap ? snap.strips : true);
     const g = gniazdoAt(mx, my, L);
     if (g) {
       const same = paths.filter((p) => extOf(p) === seqExt());
@@ -2411,14 +2934,29 @@
       api.join(same, g.index).catch(() => { S.busy = false; });
       return 'join';
     }
-    if (my >= L.stripTop && my < L.stripTop + STRIP_H) {
+    if (L.stripTop != null && my >= L.stripTop && my < L.stripTop + STRIP_H) {
       if (S.kind !== 'video') { showStatus('Podkłady działają tylko pod Sekwencją wideo', 'error', '', 4000); return 'reject'; }
       const mp3 = paths.filter((p) => extOf(p) === '.mp3');
       if (!mp3.length) { showStatus('Podkładem może być tylko plik MP3', 'error', '', 4000); return 'reject'; }
       for (const p of mp3) api.add_podklad(p).catch(() => {});
       return 'podklad';
     }
+    if (L.nakStripTop != null && my >= L.nakStripTop && my < L.nakStripTop + STRIP_H && S.kind === 'video') {
+      const mp4 = paths.filter((p) => extOf(p) === '.mp4');
+      if (!mp4.length) { showStatus('Nakładką może być tylko plik MP4', 'error', '', 4000); return 'reject'; }
+      const at = frameTs(clamp(ordAtS(nakDropS(mx)), 0, S.N - 1));
+      for (const p of mp4) api.add_nakladka(p, at).catch(() => {});
+      return 'nakladka';
+    }
     return 'none';
+  }
+
+  // Początek Nakładki upuszczonej w x (czas Sekwencji Klatki, z Przyciąganiem).
+  function nakDropS(mx) {
+    let s = clamp(sOf(mx), 0, S.duration);
+    const c = snap(s, snapTargets(null));
+    if (c != null) s = c;
+    return S.seqs[clamp(ordAtS(s), 0, S.N - 1)];
   }
 
   // ---------- start ----------
@@ -2431,6 +2969,7 @@
   else window.addEventListener('pywebviewready', announceReady);
 
   window.__ciach = { S, frameTs, frameIndex, seqOf, fileOf, ordAtS, holesIn, video, dropFiles, layout, extent, podByGen,
-    podStart, podEnd, podLen, zoomAt, kadrAt, kadrKeys, commitKadr, visibleKadry, videoRect, ov, startCut, executeCut, undo };
+    podStart, podEnd, podLen, zoomAt, kadrAt, kadrKeys, commitKadr, visibleKadry, videoRect, ov, startCut, executeCut, undo,
+    nakByGen, nakGeom, nakCorners, hitNak, visibleNaks, keyUV, nakPixel, nk };
   requestAnimationFrame(tick);
 })();

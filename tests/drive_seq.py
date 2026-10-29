@@ -144,18 +144,20 @@ s = state()
 print("1 loaded:", s["parts"], "N", s["N"], "tlH", s["tlH"])
 assert s["N"] == 120 and s["tlH"] == 110
 
-# Gniazda podczas przeciągania: syntetyczny dragover bez typów → oba rodzaje Gniazd
+# Gniazda podczas przeciągania: syntetyczny dragover bez typów → wszystkie rodzaje Gniazd (Styki, Podkład, Nakładka)
 js("(()=>{const c=document.getElementById('tl');const r=c.getBoundingClientRect();const dt=new DataTransfer();"
    "window.dispatchEvent(new DragEvent('dragenter',{clientX:r.left+20,clientY:r.top+40,dataTransfer:dt,bubbles:true,cancelable:true}));"
    "window.dispatchEvent(new DragEvent('dragover',{clientX:r.left+20,clientY:r.top+40,dataTransfer:dt,bubbles:true,cancelable:true}));return true})()")
 time.sleep(0.3)
 s = state()
 print("2 dragover: tlH", s["tlH"], "dragover", js("JSON.stringify(window.__ciach.S.dragOver)"))
-assert s["tlH"] == 134, "pasek Gniazda Podkładu powinien dodać 24 px"
+assert s["tlH"] == 158, "paski Gniazd Podkładu i Nakładki powinny dodać po 24 px"
 shot("s1_gniazda.png")
 js("window.dispatchEvent(new DragEvent('drop',{clientX:100,clientY:100,dataTransfer:new DataTransfer(),bubbles:true,cancelable:true})); true")
 time.sleep(0.2)
 assert state()["tlH"] == 110
+# migawka geometrii z tego syntetycznego dropu (wyższy timeline) nie może trafić do kolejnych dropFiles
+js("window.__ciach.S.lastDrop=null; true")
 
 # niezgodne nagranie (640x360) na Gniazdo → komunikat, Sekwencja bez zmian
 r = drop([D], "gniazdo", 1)

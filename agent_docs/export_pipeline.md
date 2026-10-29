@@ -174,3 +174,42 @@ zaczynający się przed `pre` dostaje większe `tin` zamiast ujemnego opóźnien
 w Małym Ciachu plan dostaje `audio_streams >= 2`, żeby nigdy nie wybrał kopii, i bierze bitrate
 z drabinki. Weryfikacja: `tests/test_sekwencja.py` mierzy `volumedetect` w oknach, gdzie Podkład
 ma być słyszalny i gdzie ma być cisza.
+
+## Nakładki (klucz + overlay)
+
+Decyzja i powody: `docs/adr/0003-nakladka.md`. UI wysyła w `mix.nakladki` listę od najniższej warstwy:
+`{gen, at, segs, gain, x, y, s, r, key}` (`at` = czas pliku Klatki, `segs` = odcinki pliku Nakładki jak u
+Podkładu, `x`/`y` = środek jako ułamek obrazu, `s` = szerokość / szerokość obrazu, `r` = stopnie zgodnie
+z ruchem wskazówek zegara, `key` = Kolor klucza RGB z podglądu). `App.resolve_naks` waliduje i przelicza
+klucz przez `key_yuv` na surowe YUV pliku Nakładki, `App.nak_filters` buduje obraz:
+
+```
+[1:v:0]trim=…,setpts=PTS-STARTPTS[n0c]                      (albo split + trim + concat dla odcinków)
+[n0c]setpts=PTS+g0/TB,setpts='PTS+(gte(T,p)*d+…)/TB',chromakey=color=0xYYUUVV:similarity=0.1:blend=0.08:yuv=1,
+     despill=type=green,format=gbrap,scale=W:H,rotate=…:fillcolor=none[n0k]
+[0:v:0][n0k]overlay=x=CX-w/2:y=CY-h/2:eof_action=pass[n0o]   → dalej Zbliżenie, select/setpts dziur, fps, scale
+```
+
+- Overlay stoi na wejściu 0 przed Zbliżeniem (Zbliżenie powiększa Nakładkę) i przed wycięciem dziur,
+  czyli w czasie pliku minus `pre`. Nakładka gra w czasie Sekwencji, więc zaczyna się w `graph(at)`, a
+  drugi `setpts` rozsuwa ją o każdą dziurę przed klatką (`p` = `graph(a)` dziury, `d` = jej długość):
+  odwrotność `cut_filters`. Po `select`/`setpts` dziur Nakładka jest ciągła przez szew.
+- Wejście Nakładki ma własny wejściowy `-ss` (początek potrzebnego odcinka minus 1 s); `trim` liczy od
+  niego (`a - ss`). Nakładka zaczynająca się przed `pre` traci początek odcinków jak Podkład.
+- `overlay` przed pierwszą klatką Nakładki przepuszcza obraz (framesync: drugie wejście `EXT_NULL`), a
+  `eof_action=pass` po ostatniej (domyślne `repeatlast` zostawiłoby ostatnią klatkę na zawsze). Nie
+  trzeba `enable`.
+- `chromakey` z `yuv=1`: bez tego przelicza kolor RGB macierzą BT.601, a nagrania OBS są BT.709. Alfa =
+  clamp((odległość UV − similarity) / blend), odległość = średnia z 3×3 próbek chrominancji
+  `sqrt((du² + dv²) / (2·255²))`. `despill` (domyślne mix 0,5, expand 0) daje g = min(g, (r + b) / 2) na
+  każdym pikselu. Oba wzory sprawdzone na pojedynczych pikselach; shader `NAK_FS` w app.js liczy to samo.
+- `rotate` obraca zgodnie z ruchem wskazówek zegara (sprawdzone na asymetrycznym znaczniku), `ow/oh` =
+  `rotw/roth`, `fillcolor=none` (przezroczyste rogi; stąd `format=gbrap` przed). `overlay` liczy położenie
+  z wymiarów obróconej klatki (`w`, `h`), więc środek zostaje w `CX, CY`.
+- Dźwięk Nakładki z audio to wpis w `mix["podklady"]` (osobne wejście `-i`, `atrim` + `adelay`) jak Podkład;
+  `mix_filters` dostaje `first_idx` za wejściami obrazu Nakładek. Mały Ciach: wejścia obrazu Nakładek są
+  w obu przebiegach, miks tylko w drugim.
+
+Test: `tests/test_nakladka.py` czyta kolor jednego wiersza / kolumny obrazu na każdej klatce
+(czerwony = Nakładka, niebieski = tło Sekwencji, zielony = klucz nie zadziałał): położenie, skala,
+obrót 90°, szew Wycięcia, Zbliżenie powiększające Nakładkę, odcinki i dwie warstwy, Mały Ciach, dźwięk.

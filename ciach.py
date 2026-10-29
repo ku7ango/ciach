@@ -54,6 +54,16 @@ SMALL_MP3_RATES = [128_000, 96_000, 64_000]
 KADR_MIN = 0.2  # najmniejszy Kadr: 20 % obrazu (5×)
 ZOOM_CMD = "zoom.cmd"  # plik poleceń sendcmd w katalogu tymczasowym eksportu (ffmpeg dostaje cwd)
 ZOOM_EPS = 0.0005  # zapas jak przy cięciu: klatka o znaczniku `at` wchodzi do przedziału
+# Nakładka: parametry klucza (te same w shaderze podglądu, app.js KEY_SIM / KEY_BLEND), granice Kadru Nakładki
+KEY_SIMILARITY = 0.10
+KEY_BLEND = 0.08
+NAK_MIN = 0.03   # najmniejsza szerokość Nakładki: 3 % szerokości obrazu
+NAK_MAX = 3.0
+# RGB → U, V (bez przesunięcia 128) dla macierzy z pliku; zakres tv mnoży przez 224, pc przez 255 (app.js MATRIX)
+MATRIX = {
+    "bt709": ((0.2126, 0.7152, 0.0722), (-0.1146, -0.3854, 0.5), (0.5, -0.4542, -0.0458)),
+    "bt601": ((0.299, 0.587, 0.114), (-0.1687, -0.3313, 0.5), (0.5, -0.4187, -0.0813)),
+}
 
 
 def find_tool(name: str) -> str:
@@ -143,6 +153,24 @@ def plan_small_video(dur: float, width: int, height: int, fps: float, vbitrate: 
         "v_rate": int(v_rate), "fps": out_fps, "height": out_h,
         "scale": out_h != height, "fps_change": out_fps != fps,
     }
+
+
+def key_yuv(rgb, matrix: str, full_range: bool) -> tuple[int, int, int]:
+    """Kolor klucza Nakładki (RGB z podglądu) jako surowe Y, U, V pliku: `chromakey` porównuje chrominancję
+    pikseli w YUV pliku, a sam przelicza kolor RGB zawsze macierzą BT.601, co dla nagrań BT.709 (OBS)
+    trafiałoby obok. Dlatego klucz idzie z `yuv=1`, przeliczony macierzą i zakresem Nakładki, tak samo
+    jak w shaderze podglądu."""
+    ky, ku, kv = MATRIX.get(matrix, MATRIX["bt709"])
+    c = [max(0.0, min(255.0, float(v))) / 255.0 for v in rgb]
+    if full_range:
+        y = 255 * sum(a * b for a, b in zip(ky, c))
+        sc = 255
+    else:
+        y = 16 + 219 * sum(a * b for a, b in zip(ky, c))
+        sc = 224
+    u = 128 + sc * sum(a * b for a, b in zip(ku, c))
+    v = 128 + sc * sum(a * b for a, b in zip(kv, c))
+    return tuple(int(max(0, min(255, round(q)))) for q in (y, u, v))
 
 class Fragment:
     """Zakres Ciachu w czasie pliku: [start, end) bez `holes`, czyli wykonanych Wycięć (ADR 0002).
@@ -236,6 +264,8 @@ class Media:
         self.sig: tuple | None = None  # sygnatura pierwszego Nagrania Sekwencji (patrz signature)
         self.vbitrate = 0
         self.abitrate = 0
+        self.matrix = "bt709"  # macierz YUV obrazu (klucz Nakładki), patrz key_yuv
+        self.full_range = False
         self.frames: bytes | None = None
         self.wave: bytes | None = None
         self.procs: list[subprocess.Popen] = []
@@ -283,6 +313,15 @@ class Media:
                 fps = 30.0
             self.fps = fps
             self.frame_step = 1.0 / fps
+            # Bez znacznika przestrzeni barw: HD jako BT.709, SD jako BT.601 (tak zgaduje też dekoder podglądu)
+            cs = str(v.get("color_space") or "")
+            if cs in ("smpte170m", "bt470bg"):
+                self.matrix = "bt601"
+            elif cs == "bt709":
+                self.matrix = "bt709"
+            else:
+                self.matrix = "bt709" if self.height >= 720 else "bt601"
+            self.full_range = v.get("color_range") == "pc" or self.pix_fmt.startswith("yuvj")
             self.vbitrate = int(float(v.get("bit_rate") or 0))
             if not self.vbitrate:
                 self.vbitrate = max(0, int(float(fmt.get("bit_rate") or 0)) - self.abitrate)
@@ -335,6 +374,8 @@ class Media:
             "height": self.height,
             "vcodec": self.vcodec,
             "audioStreams": self.audio_streams,
+            "matrix": self.matrix,
+            "fullRange": self.full_range,
             "waveBinSec": WAVE_BIN / WAVE_RATE,
             "parts": [{"name": self.copies[p["src"]]["name"], "duration": self.copies[p["src"]]["duration"],
                        "start": self.copies[p["src"]]["start"], "src": p["src"], "in": p["in"], "out": p["out"]}
@@ -373,6 +414,7 @@ class App:
         # Podkłady: osobne Media (mp3) pod Sekwencją, po gen. Sklejanie Sekwencji: pliki
         # tymczasowe w `seq_dir`, proces ffmpeg w `join_proc`, blokada `joining`.
         self.podklady: dict[int, Media] = {}
+        self.nakladki: dict[int, Media] = {}  # Nakładki (mp4 z zielonym tłem) nad Sekwencją, po gen
         self.seq_dir: str | None = None
         self.join_proc: subprocess.Popen | None = None
         self.joining = False
@@ -381,7 +423,7 @@ class App:
         m = self.media
         if m and m.gen == gen:
             return m
-        return self.podklady.get(gen)
+        return self.podklady.get(gen) or self.nakladki.get(gen)
 
     # ---------- komunikacja z JS ----------
     def emit(self, event: str, **data):
@@ -432,7 +474,7 @@ class App:
         return f"{APP_NAME} – {m.display_name}{extra}"
 
     def load(self, path: str):
-        """Podmiana całej sesji: nowe Nagranie, bez Podkładów i bez Sekwencji."""
+        """Podmiana całej sesji: nowe Nagranie, bez Podkładów, Nakładek i bez Sekwencji."""
         if self.joining:
             self.emit("reject", message="Poczekaj na sklejanie.")
             return
@@ -442,6 +484,7 @@ class App:
             self.emit("reject", message=str(e))
             return
         self.clear_podklady()
+        self.clear_nakladki()
         self.install_media(media, reason="open")
 
     def install_media(self, media: Media, reason: str):
@@ -644,6 +687,35 @@ class App:
         for m in olds:
             m.kill()
 
+    # ---------- Nakładki ----------
+    def add_nakladka(self, path: str, at: float = 0.0):
+        """Nowa Nakładka; `at` (czas pliku Klatki, w której upuszczono) wraca do UI w zdarzeniu."""
+        base = self.media
+        if not base or base.kind != "video":
+            self.emit("reject", message="Nakładkę można dodać tylko nad Sekwencję wideo.")
+            return
+        if os.path.splitext(path)[1].lower() != ".mp4":
+            self.emit("reject", message="Nakładką może być tylko plik MP4.")
+            return
+        try:
+            m = self.probe_new(path)
+        except MediaError as e:
+            self.emit("reject", message=str(e))
+            return
+        if m.kind != "video" or not m.width or not m.height:
+            self.emit("reject", message="Nakładka nie zawiera obrazu.")
+            return
+        with self.lock:
+            self.nakladki[m.gen] = m
+        self.emit("nakladka", info=m.info(), at=float(at))
+
+    def clear_nakladki(self):
+        with self.lock:
+            olds = list(self.nakladki.values())
+            self.nakladki.clear()
+        for m in olds:
+            m.kill()
+
     def scan_frames(self, m: Media):
         sel = "v:0" if m.kind == "video" else "a:0"
         cmd = [FFPROBE, "-v", "error", "-select_streams", sel,
@@ -749,8 +821,8 @@ class App:
     def start_export(self, start: float, end: float, mode: str = "full", mix: dict | None = None,
                      holes=None) -> dict:
         """`mix`: {"gain": Głośność Sekwencji 0..1, "podklady": [{"gen", "at", "segs" | "tin"/"tout", "gain"}],
-        "zblizenia": [...]}. `at` = czas pliku, w którym zaczyna się Podkład; `segs` = odcinki mp3 grane
-        po kolei. `holes`: [[a, b], ...] wykonane Wycięcia w czasie pliku wewnątrz [start, end)."""
+        "zblizenia": [...], "nakladki": [...]}. `at` = czas pliku, w którym zaczyna się Podkład; `segs` = odcinki
+        mp3 grane po kolei. `holes`: [[a, b], ...] wykonane Wycięcia w czasie pliku wewnątrz [start, end)."""
         with self.lock:
             if self.export_active:
                 return {"ok": False, "message": "Eksport już trwa."}
@@ -763,13 +835,14 @@ class App:
             if fr.dur <= 0:
                 return {"ok": False, "message": "Pusty zakres."}
             zooms = self.resolve_zoom(m, (mix or {}).get("zblizenia"), fr)
-            mix = self.resolve_mix(m, mix or {})
+            naks = self.resolve_naks(m, (mix or {}).get("nakladki"))
+            mix = self.resolve_mix(m, mix or {}, naks)
             if fr.holes and mix is None and m.kind == "video":
                 # dziury w dźwięku da się wyciąć tylko filtrem, więc idzie przez tor miksu (jedna ścieżka AAC)
                 mix = {"gain": 1.0, "podklady": []}
             self.export_active = True
         target = self.run_small_export if mode == "small" else self.run_export
-        threading.Thread(target=target, args=(m, fr, mix, zooms), daemon=True).start()
+        threading.Thread(target=target, args=(m, fr, mix, zooms, naks), daemon=True).start()
         return {"ok": True}
 
     @staticmethod
@@ -934,9 +1007,125 @@ class App:
         rozmiaru wyjścia (scale jako jedyny filtr przyjmuje zmienny rozmiar klatek wejściowych)."""
         return [f"sendcmd=f={ZOOM_CMD}", "crop=w=iw:h=ih:x=0:y=0", f"scale={out_w}:{out_h}"]
 
-    def resolve_mix(self, m: Media, mix: dict) -> dict | None:
+    @staticmethod
+    def clean_segs(raw, duration: float) -> list[tuple[float, float]]:
+        """Odcinki Podkładu albo Nakładki ([[tin, tout], ...] w sekundach jej pliku), przycięte do pliku."""
+        segs: list[tuple[float, float]] = []
+        for sg in raw if isinstance(raw, list) else []:
+            try:
+                tin, tout = float(sg[0]), float(sg[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            tin = max(0.0, min(tin, duration))
+            tout = max(tin, min(tout, duration))
+            if tout - tin > 0:
+                segs.append((tin, tout))
+        return segs
+
+    def resolve_naks(self, m: Media, spec) -> list[dict]:
+        """Nakładki z UI, od najniższej warstwy: [{gen, at, segs, gain, x, y, s, r, key: [r, g, b]}].
+        `at` = czas pliku Klatki, w której zaczyna się Nakładka, `x`/`y` = środek jako ułamek obrazu,
+        `s` = szerokość jako ułamek szerokości obrazu (wysokość z proporcji Nakładki), `r` = obrót w stopniach
+        zgodnie z ruchem wskazówek zegara, `key` = kolor klucza z podglądu."""
+        out: list[dict] = []
+        if m.kind != "video" or not m.width or not isinstance(spec, list):
+            return out
+        for n in spec:
+            if not isinstance(n, dict):
+                continue
+            nm = self.nakladki.get(int(n.get("gen", 0) or 0))
+            if not nm:
+                continue
+            segs = self.clean_segs(n.get("segs"), nm.duration)
+            if not segs:
+                continue
+            try:
+                key = [int(max(0, min(255, round(float(v))))) for v in (n.get("key") or [0, 177, 64])[:3]]
+                at, x, y = float(n.get("at", 0.0)), float(n.get("x", 0.5)), float(n.get("y", 0.5))
+                s_, r = float(n.get("s", 1.0)), float(n.get("r", 0.0))
+                gain = float(n.get("gain", 1.0))
+            except (TypeError, ValueError):
+                continue
+            if len(key) != 3:
+                continue
+            out.append({"path": nm.path, "at": at, "segs": segs, "gain": max(0.0, min(1.0, gain)),
+                        "x": max(0.0, min(1.0, x)), "y": max(0.0, min(1.0, y)),
+                        "s": max(NAK_MIN, min(NAK_MAX, s_)), "r": ((r + 180.0) % 360.0) - 180.0,
+                        "key": key_yuv(key, nm.matrix, nm.full_range),
+                        "width": nm.width, "height": nm.height, "audio": nm.audio_streams > 0})
+        return out
+
+    @staticmethod
+    def nak_filters(m: Media, fr: "Fragment", naks: list[dict], first_idx: int = 1) -> tuple[list[str], list[str], str, int]:
+        """Obraz Nakładek nałożony na obraz Sekwencji (wejście 0) w czasie pliku, czyli PRZED Zbliżeniem
+        (sendcmd liczy czas pliku) i przed wycięciem dziur. Nakładka gra w czasie Sekwencji: jej odcinki
+        (`trim` + `concat`) zaczynają się w grafie od `graph(at)`, a drugi `setpts` rozsuwa je o każdą dziurę
+        przed nimi, odwrotnie niż `Fragment.cut_filters`, więc po wycięciu dziur Nakładka jest ciągła.
+        Klucz: `chromakey` w YUV pliku (`yuv=1`, patrz key_yuv) i `despill`, potem `scale` i `rotate`
+        z przezroczystym tłem; `overlay` z `eof_action=pass` znika po ostatniej klatce (przed pierwszą
+        przepuszcza obraz sam). Zwraca (argumenty wejść, filtry, etykietę obrazu, następny indeks wejścia)."""
+        inputs: list[str] = []
+        filters: list[str] = []
+        cur = "[0:v:0]"
+        idx = first_idx
+        s_start, s_end = fr.seq(fr.start), fr.seq(fr.end)
+        shift = "+".join(f"gte(T,{fr.graph(a) - ZOOM_EPS:.6f})*{b - a:.6f}" for a, b in fr.holes)
+        W, H = m.width, m.height
+        for k, n in enumerate(naks):
+            segs = [list(sg) for sg in n["segs"]]
+            total = sum(b - a for a, b in segs)
+            s0 = fr.seq(n["at"])
+            if s0 >= s_end or s0 + total <= s_start:
+                continue
+            g0 = fr.graph(n["at"])
+            if g0 < 0:
+                skip = -g0
+                while segs and skip > 0:
+                    ln = segs[0][1] - segs[0][0]
+                    if ln <= skip:
+                        skip -= ln
+                        segs.pop(0)
+                    else:
+                        segs[0][0] += skip
+                        skip = 0
+                g0 = 0.0
+            if not segs:
+                continue
+            # wejściowy -ss z zapasem (szybki skok), dokładne cięcie robi trim; znaczniki liczą się od `ss`
+            ss = max(0.0, segs[0][0] - 1.0)
+            inputs += ["-ss", f"{ss:.6f}", "-i", n["path"]]
+            src = f"[{idx}:v:0]"
+            if len(segs) == 1:
+                a, b = segs[0]
+                filters.append(f"{src}trim=start={a - ss:.6f}:end={b - ss:.6f},setpts=PTS-STARTPTS[n{k}c]")
+            else:
+                K = len(segs)
+                filters.append(f"{src}split={K}" + "".join(f"[n{k}s{j}]" for j in range(K)))
+                for j, (a, b) in enumerate(segs):
+                    filters.append(f"[n{k}s{j}]trim=start={a - ss:.6f}:end={b - ss:.6f},setpts=PTS-STARTPTS[n{k}t{j}]")
+                filters.append("".join(f"[n{k}t{j}]" for j in range(K)) + f"concat=n={K}:v=1:a=0[n{k}c]")
+            w = max(2, int(round(n["s"] * W / 2)) * 2)
+            h = max(2, int(round(w * n["height"] / n["width"] / 2)) * 2)
+            yk, uk, vk = n["key"]
+            chain = [f"setpts=PTS+{g0:.6f}/TB"]
+            if shift:
+                chain.append(f"setpts='PTS+({shift})/TB'")
+            chain += [f"chromakey=color=0x{yk:02X}{uk:02X}{vk:02X}:similarity={KEY_SIMILARITY}:blend={KEY_BLEND}:yuv=1",
+                      "despill=type=green", "format=gbrap", f"scale={w}:{h}"]
+            if abs(n["r"]) > 1e-3:
+                rad = n["r"] * 3.141592653589793 / 180.0
+                chain.append(f"rotate={rad:.6f}:ow=rotw({rad:.6f}):oh=roth({rad:.6f}):fillcolor=none")
+            filters.append(f"[n{k}c]{','.join(chain)}[n{k}k]")
+            out = f"[n{k}o]"
+            filters.append(f"{cur}[n{k}k]overlay=x={n['x'] * W:.2f}-w/2:y={n['y'] * H:.2f}-h/2:eof_action=pass{out}")
+            cur = out
+            idx += 1
+        return inputs, filters, cur, idx
+
+    def resolve_mix(self, m: Media, mix: dict, naks: list[dict] | None = None) -> dict | None:
         """Zamienia gen Podkładów na ścieżki i odrzuca miks, który nic nie zmienia (kopia 1:1).
-        Podkład ma `segs` (odcinki mp3 grane po kolei, po Wycięciach) albo starsze `tin`/`tout`."""
+        Podkład ma `segs` (odcinki mp3 grane po kolei, po Wycięciach) albo starsze `tin`/`tout`.
+        Dźwięk Nakładek (z `resolve_naks`) wchodzi do listy `podklady` jako taki sam odcinkowy dźwięk."""
         gain = float(mix.get("gain", 1.0))
         gain = max(0.0, min(1.0, gain))
         pods = []
@@ -947,30 +1136,25 @@ class App:
             raw = p.get("segs")
             if not isinstance(raw, list):
                 raw = [[p.get("tin", 0.0), p.get("tout", pm.duration)]]
-            segs: list[tuple[float, float]] = []
-            for sg in raw:
-                try:
-                    tin, tout = float(sg[0]), float(sg[1])
-                except (TypeError, ValueError, IndexError):
-                    continue
-                tin = max(0.0, min(tin, pm.duration))
-                tout = max(tin, min(tout, pm.duration))
-                if tout - tin > 0:
-                    segs.append((tin, tout))
+            segs = self.clean_segs(raw, pm.duration)
             if not segs:
                 continue
             pods.append({"path": pm.path, "at": float(p.get("at", 0.0)), "segs": segs,
                          "gain": max(0.0, min(1.0, float(p.get("gain", 1.0))))})
+        for n in naks or []:
+            if n["audio"]:
+                pods.append({"path": n["path"], "at": n["at"], "segs": n["segs"], "gain": n["gain"]})
         if m.kind != "video" or (abs(gain - 1.0) < 1e-6 and not pods):
             return None
         return {"gain": gain, "podklady": pods}
 
     @staticmethod
-    def mix_filters(m: Media, fr: "Fragment", mix: dict) -> tuple[list[str], list[str], str]:
+    def mix_filters(m: Media, fr: "Fragment", mix: dict, first_idx: int = 1) -> tuple[list[str], list[str], str]:
         """Graf miksu: dźwięk Sekwencji (wejście 0, przesunięte o `pre` przez wejściowy -ss) plus
-        Podkłady jako kolejne wejścia. Z dziurami dźwięk Sekwencji to odcinki `atrim` sklejone
-        `concat` (próbka po próbce; pierwszy odcinek zaczyna się w `pre`, żeby wyjściowy -ss
-        ciął dźwięk i obraz w tym samym miejscu). Zwraca (argumenty wejść, filtry, etykietę)."""
+        Podkłady (i dźwięk Nakładek) jako kolejne wejścia od `first_idx` (wcześniejsze zajmuje obraz
+        Nakładek). Z dziurami dźwięk Sekwencji to odcinki `atrim` sklejone `concat` (próbka po próbce;
+        pierwszy odcinek zaczyna się w `pre`, żeby wyjściowy -ss ciął dźwięk i obraz w tym samym
+        miejscu). Zwraca (argumenty wejść, filtry, etykietę)."""
         inputs: list[str] = []
         filters: list[str] = []
         chains: list[str] = []
@@ -990,7 +1174,7 @@ class App:
             else:
                 filters.append(f"{src}{f}volume={mix['gain']:.4f}[a0]")
             chains.append("[a0]")
-        idx = 1
+        idx = first_idx
         s_start, s_end = fr.seq(fr.start), fr.seq(fr.end)
         for p in mix["podklady"]:
             # Czas pliku `at` odpowiada w grafie czasowi Sekwencji minus `pre` (wejście 0 zaczyna
@@ -1053,15 +1237,18 @@ class App:
         return ["-ss", f"{pre:.6f}", "-i", m.path, *(extra_inputs or []), "-ss", f"{oss:.6f}", "-t", f"{fr.dur:.6f}"]
 
     def build_small_cmd(self, m: Media, fr: "Fragment", out: str, plan: dict,
-                        pass_no: int, passlog: str, mix: dict | None = None, zoom: bool = False) -> list[str]:
-        extra_inputs: list[str] = []
+                        pass_no: int, passlog: str, mix: dict | None = None, zoom: bool = False,
+                        naks: list[dict] | None = None) -> list[str]:
+        # Nakładki wchodzą do obu przebiegów (zmieniają obraz), miks tylko do drugiego.
+        nak_inputs, filters, vsrc, idx = self.nak_filters(m, fr, naks or [])
+        extra_inputs: list[str] = list(nak_inputs)
         mix_filters: list[str] = []
         mix_label = ""
         if mix and pass_no == 2:
-            extra_inputs, mix_filters, mix_label = self.mix_filters(m, fr, mix)
+            mix_inputs, mix_filters, mix_label = self.mix_filters(m, fr, mix, idx)
+            extra_inputs += mix_inputs
         cmd = [FFMPEG, "-y", "-hide_banner", "-v", "error", "-nostats", "-progress", "pipe:1",
                *self.seek_args(m, fr, extra_inputs)]
-        filters: list[str] = []
         vf: list[str] = []
         if zoom:
             # Zbliżenie skaluje od razu do rozmiaru z planu: crop daje klatki o zmiennym rozmiarze,
@@ -1075,10 +1262,10 @@ class App:
         if plan["scale"] and not zoom:
             vf.append(f"scale=-2:{plan['height']}")
         if vf:
-            filters.append(f"[0:v:0]{','.join(vf)}[v]")
+            filters.append(f"{vsrc}{','.join(vf)}[v]")
             vmap = "[v]"
         else:
-            vmap = "0:v:0"
+            vmap = vsrc if filters else "0:v:0"
         amap = None
         audio_args: list[str] = ["-an"]
         if pass_no == 2 and mix_label:
@@ -1167,7 +1354,7 @@ class App:
             pass
 
     def run_small_export(self, m: Media, fr: "Fragment", mix: dict | None = None,
-                         zooms: list[dict] | None = None):
+                         zooms: list[dict] | None = None, naks: list[dict] | None = None):
         stem, ext = os.path.splitext(m.display_name)
         out = self.unique_out(stem, ext.lower(), "_ciach_maly")
         tmp = tempfile.mkdtemp(prefix="ciach_")
@@ -1205,7 +1392,7 @@ class App:
                                             streams, factor)
                     passlog = os.path.join(tmp, f"pass{attempt}")
                     for pass_no in (1, 2):
-                        cmd = self.build_small_cmd(m, fr, out, plan, pass_no, passlog, mix, zoom)
+                        cmd = self.build_small_cmd(m, fr, out, plan, pass_no, passlog, mix, zoom, naks)
                         base = 50.0 * (pass_no - 1)
                         rc, err = self.run_ffmpeg_export(cmd, dur, m, lambda p, b=base: progress(b + p / 2), cwd=tmp)
                         if cancelled():
@@ -1280,27 +1467,32 @@ class App:
                 time.sleep(0.2)
 
     def build_cmd(self, m: Media, fr: "Fragment", out: str, encoder: str,
-                  mix: dict | None = None, zoom: bool = False) -> list[str]:
+                  mix: dict | None = None, zoom: bool = False, naks: list[dict] | None = None) -> list[str]:
         # Dwustopniowy seek: wejściowy -ss do ~3 s przed cięciem (szybki skok do
         # klatki kluczowej), wyjściowy -ss dokładnie na cięcie. Dzięki temu
         # kopiowane strumienie (audio) też zaczynają się w miejscu cięcia, a nie
         # na klatce kluczowej sprzed niego. 0,5 ms zapasu gwarantuje, że klatka
         # o znaczniku `start` wejdzie, a klatka o znaczniku `end` już nie.
         # Wycięcia (dziury): obraz przez select/setpts, dźwięk przez tor miksu (ADR 0002).
+        # Nakładki: overlay na wejściu 0 przed Zbliżeniem (ADR 0003).
         head = [FFMPEG, "-y", "-hide_banner", "-v", "error", "-nostats", "-progress", "pipe:1"]
         if m.kind == "video":
             venc = NVENC_ARGS if encoder == "nvenc" else X264_ARGS
+            inputs, vfilters, vsrc, idx = self.nak_filters(m, fr, naks or [])
             vf = (self.zoom_chain(m.width, m.height) if zoom else []) + fr.cut_filters()
-            vfilters = [f"[0:v:0]{','.join(vf)}[v]"] if vf else []
-            vmap = "[v]" if vf else "0:v:0"
+            if vf:
+                vfilters.append(f"{vsrc}{','.join(vf)}[v]")
+                vmap = "[v]"
+            else:
+                vmap = vsrc if vfilters else "0:v:0"
             if mix:
                 # Podkłady, Głośność albo Wycięcia: jedna ścieżka AAC z miksu (patrz export_pipeline.md).
-                inputs, filters, label = self.mix_filters(m, fr, mix)
-                return head + [*self.seek_args(m, fr, inputs), "-filter_complex", ";".join(vfilters + filters),
+                mix_inputs, filters, label = self.mix_filters(m, fr, mix, idx)
+                return head + [*self.seek_args(m, fr, inputs + mix_inputs), "-filter_complex", ";".join(vfilters + filters),
                                "-map", vmap, "-map", label, *venc, *VIDEO_TB, "-pix_fmt", "yuv420p",
                                "-c:a", "aac", "-b:a", str(MIX_AUDIO_RATE), "-movflags", "+faststart", out]
             fc = ["-filter_complex", ";".join(vfilters)] if vfilters else []
-            return head + [*self.seek_args(m, fr), *fc, "-map", vmap, "-map", "0:a?", *venc, *VIDEO_TB,
+            return head + [*self.seek_args(m, fr, inputs), *fc, "-map", vmap, "-map", "0:a?", *venc, *VIDEO_TB,
                            "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out]
         return head + [*self.seek_args(m, fr), "-map", "0", "-c", "copy", "-map_metadata", "0",
                        "-id3v2_version", "3", "-avoid_negative_ts", "make_zero", out]
@@ -1346,7 +1538,7 @@ class App:
         return p.returncode, b"".join(err_chunks).decode("utf-8", "replace")
 
     def run_export(self, m: Media, fr: "Fragment", mix: dict | None = None,
-                   zooms: list[dict] | None = None):
+                   zooms: list[dict] | None = None, naks: list[dict] | None = None):
         stem, ext = os.path.splitext(m.display_name)
         out = self.unique_out(stem, ext.lower())
         self.export_out = out
@@ -1367,7 +1559,7 @@ class App:
             attempts = [encoder] if (m.kind != "video" or encoder == "x264") else ["nvenc", "x264"]
             rc, err, cmd = 1, "", []
             for enc in attempts:
-                cmd = self.build_cmd(m, fr, out, enc, mix, zoom)
+                cmd = self.build_cmd(m, fr, out, enc, mix, zoom, naks)
                 rc, err = self.run_ffmpeg_export(cmd, fr.dur, m, cwd=tmp)
                 if rc == 0:
                     break
@@ -1461,6 +1653,7 @@ class App:
         if self.media:
             self.media.kill()
         self.clear_podklady()
+        self.clear_nakladki()
         self.cleanup_temp()
         return True
 
@@ -1522,6 +1715,10 @@ class Api:
 
     def remove_podklad(self, gen):
         self._app.remove_podklad(int(gen))
+        return True
+
+    def add_nakladka(self, path, at=0.0):
+        threading.Thread(target=self._app.add_nakladka, args=(str(path), float(at or 0.0)), daemon=True).start()
         return True
 
 
